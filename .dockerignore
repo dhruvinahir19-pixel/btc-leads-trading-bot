@@ -1,0 +1,31 @@
+# Project
+.git/
+.gitignore
+.env
+*.md
+nul
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+venv/
+.env/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/package-lock.json
+
+# Data (persisted via volume)
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.dockerignore
