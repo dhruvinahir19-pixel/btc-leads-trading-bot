@@ -1,0 +1,31 @@
+# Web Framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# Database
+aiosqlite==0.20.0
+
+# Scheduling
+apscheduler==3.11.0
+
+# HTTP Client
+httpx==0.28.1
+
+# CORS for frontend
+# (included with fastapi)
+
+# Email
+# (smtplib is built-in)
+
+# Templating (for dashboard)
+jinja2==3.1.5
+
+# Date handling
+python-dateutil==2.9.0
+pytz==2024.2
+
+# Caching & state
+# (json + sqlite are built-in)
+
+# Web serving
+python-multipart==0.0.20

@@ -1,0 +1,41 @@
+# ─── API Keys & Secrets ────────────────────────────────────────
+.env
+
+# ─── Python ────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+venv/
+.env/
+
+# ─── Logs & Data ───────────────────────────────────────────────
+*.log
+signals_*.csv
+data/
+*.db
+
+# ─── Frontend / Node ───────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+
+# ─── Backend Build Output ──────────────────────────────────────
+backend/static/assets/
+backend/static/index.html
+backend/static/vite.svg
+
+# ─── Editor / OS ───────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── Docker ────────────────────────────────────────────────────
+.docker/

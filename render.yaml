@@ -1,0 +1,78 @@
+# =============================================================================
+# Render Blueprint — One-click deploy for BTC Leads Trading Bot
+# =============================================================================
+# How to use:
+#   1. Push your repo to GitHub
+#   2. In Render dashboard, click "New +" → "Blueprint"
+#   3. Connect your repo — Render auto-detects this file
+#   4. Set the secret env vars (marked "sync: false") in Render's UI
+#   5. Deploy!
+#
+# Note: Free tier works but has NO persistent storage.
+# SQLite data will be lost on every deploy/restart.
+# Upgrade to a paid plan ($7/month) and add a Persistent Disk
+# to keep your trade history safe.
+# =============================================================================
+
+services:
+  - type: web
+    name: btc-trading-bot
+    runtime: docker
+    repo: https://github.com/YOUR_USERNAME/YOUR_REPO_NAME
+    branch: main
+    plan: free
+
+    # ─── Health Check ──────────────────────────────────────
+    # Render pings this every 5 minutes. Combined with UptimeRobot,
+    # the bot stays awake 24/7 on the free tier.
+    healthCheckPath: /health
+
+    # ─── Env Vars ──────────────────────────────────────────
+    # "sync: false" means you enter these manually in Render's UI
+    # (they're secrets — never commit to git!)
+    envVars:
+      - key: LOG_LEVEL
+        value: INFO
+      - key: HOST
+        value: 0.0.0.0
+
+      # ─── Binance API Keys (REQUIRED) ─────────────────────
+      - key: BINANCE_API_KEY
+        sync: false
+      - key: BINANCE_SECRET_KEY
+        sync: false
+      - key: BINANCE_DEMO_KEY
+        sync: false
+      - key: BINANCE_DEMO_SECRET
+        sync: false
+
+      # ─── Email Alerts (optional) ─────────────────────────
+      - key: SMTP_EMAIL
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_TO
+        sync: false
+
+      # ─── Strategy Parameters (optional overrides) ────────
+      - key: BTC_TRIGGER_PCT
+        value: "1.0"
+      - key: TP_PCT
+        value: "1.0"
+      - key: SL_PCT
+        value: "0.5"
+      - key: POSITION_SIZE_USDT
+        value: "10"
+      - key: MAX_DAILY_LOSS_USDT
+        value: "60"
+
+    # ─── Persistent Disk (Paid Plan Only) ──────────────────
+    # Uncomment below and upgrade to Render Starter ($7/mo) or higher
+    # to keep SQLite data across deploys and restarts.
+    #
+    # disk:
+    #   name: data
+    #   mountPath: /data
+    #   sizeGB: 1
+    #
+    # Then set DB_PATH=/data/trading_bot.db in envVars above.
