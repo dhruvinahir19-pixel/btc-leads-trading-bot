@@ -109,7 +109,7 @@ gh repo create btc-leads-trading-bot --public --push --source=.
 | **Name** | `btc-leads-trading-bot` |
 | **Runtime** | Python (Render reads `runtime.txt`) |
 | **Build Command** | `chmod +x render-build.sh && ./render-build.sh` |
-| **Start Command** | `uvicorn backend.main:app --host 0.0.0.0 --port $PORT --log-level info` |
+| **Start Command** | `uvicorn backend.main:app --host 0.0.0.0 --port $PORT --log-level \${LOG_LEVEL:-info}` |
 | **Plan** | Starter (or higher for production) |
 
 ### 3. Set Environment Variables
@@ -118,11 +118,10 @@ In Render dashboard → **Environment** → add all variables from `.env.example
 
 | Variable | Notes |
 |----------|-------|
-| `BINANCE_API_KEY` | Your real API key |
+| `BINANCE_API_KEY` | Your real API key (read-only) |
 | `BINANCE_SECRET_KEY` | Your real API secret |
 | `BINANCE_DEMO_KEY` | Your demo API key |
 | `BINANCE_DEMO_SECRET` | Your demo API secret |
-| `BINANCE_API_KEY` | Your read-only API key |
 | `SMTP_EMAIL` | (optional) |
 | `SMTP_PASSWORD` | (optional) |
 | `SMTP_TO` | (optional) |
@@ -139,13 +138,29 @@ Click **Create Web Service**. Render will:
 
 Your bot is live at `https://btc-leads-trading-bot.onrender.com` ✨
 
-### 5. Keep Free Tier Alive
+### 5. Persistent Storage (Render Disk)
 
-Render free tier spins down after inactivity. Use **UptimeRobot** (free) to ping your `/health` endpoint every 5 minutes:
+The bot uses **SQLite** (`DB_PATH=trading_bot.db`) to store all trade history, PnL data, and state. On Render's free tier, the filesystem is **ephemeral** — all data is lost every time the service restarts (which happens after 15 min of inactivity).
+
+**To keep your data between restarts:**
+1. Go to Render Dashboard → your Web Service → **Disks**
+2. Add a **Render Disk** (Starter plan required, ~$2/month):
+   - Name: `data`
+   - Mount Path: `/data`
+   - Size: 1 GB (more than enough)
+3. Set environment variable: `DB_PATH=/data/trading_bot.db`
+
+> **Important:** Without a Render Disk, all trade history and PnL data resets after every restart.
+
+### 6. Keep Free Tier Alive
+
+Render free tier spins down after inactivity (15 min). Use **UptimeRobot** (free) to ping your `/health` endpoint every 5 minutes:
 
 ```
 https://btc-leads-trading-bot.onrender.com/health
 ```
+
+> **Note:** Even with UptimeRobot, Render's free tier has 750 hours/month uptime limit. For 24/7 trading, upgrade to the **Starter** plan ($7/month) which never spins down.
 
 ---
 
