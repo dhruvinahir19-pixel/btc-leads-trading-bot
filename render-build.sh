@@ -17,7 +17,7 @@ pip install -r requirements.txt
 # ─── Step 2: Build Frontend (React + Vite) ───
 echo "[2/3] Building frontend..."
 cd frontend
-npm install --omit=optional
+npm install
 npm run build
 cd ..
 

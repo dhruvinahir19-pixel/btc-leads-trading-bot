@@ -107,17 +107,20 @@ gh repo create btc-leads-trading-bot --public --push --source=.
 | Setting | Value |
 |---------|-------|
 | **Name** | `btc-leads-trading-bot` |
-| **Runtime** | Python (Render reads `runtime.txt`) |
+| **Runtime** | Python (set `PYTHON_VERSION=3.13.2` env var — see note below) |
 | **Build Command** | `chmod +x render-build.sh && ./render-build.sh` |
 | **Start Command** | `uvicorn backend.main:app --host 0.0.0.0 --port $PORT --log-level \${LOG_LEVEL:-info}` |
 | **Plan** | Starter (or higher for production) |
 
 ### 3. Set Environment Variables
 
-In Render dashboard → **Environment** → add all variables from `.env.example`:
+In Render dashboard → **Environment** → add these variables:
+
+> ⚠️ **Python version:** Even though `runtime.txt` specifies `python-3.13.2`, Render's newer infrastructure may ignore it. Add `PYTHON_VERSION=3.13.2` as an env var to **force** Python 3.13.2.
 
 | Variable | Notes |
 |----------|-------|
+| `PYTHON_VERSION` | `3.13.2` — forces Python 3.13 instead of default 3.14 |
 | `BINANCE_API_KEY` | Your real API key (read-only) |
 | `BINANCE_SECRET_KEY` | Your real API secret |
 | `BINANCE_DEMO_KEY` | Your demo API key |
