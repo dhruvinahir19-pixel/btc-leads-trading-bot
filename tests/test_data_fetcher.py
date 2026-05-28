@@ -154,11 +154,11 @@ class TestWeeklyScan:
         df = DataFetcher()
 
         with patch.object(df, '_get_scan_data') as mock_scan:
-            # Mock 14 days of hourly data
+            # Mock 30 days of hourly data
             mock_scan.return_value = [
                 {"ts": 1700000000000 + i * 3600000, "o": 100 + i * 0.01,
                  "h": 101, "l": 99, "c": 100 + i * 0.01, "v": 1000}
-                for i in range(336)  # 14 days
+                for i in range(720)  # 30 days
             ]
             result = df.run_weekly_scan()
             assert result["success"] is True

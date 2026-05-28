@@ -119,12 +119,12 @@ class DataFetcher:
                 if symbol == 'BTCUSDT':
                     continue
                 
-                # Rate limit: wait 300-600ms between coins to avoid IP ban
-                # Binance Futures limit is 1200 weight/minute
-                # Each klines call = weight 10 (limit=1500) or weight 2 (limit=500)
-                # This delay spreads calls across ~5 min, well under the limit
+                # Rate limit: wait 2-3s between coins to avoid IP ban
+                # 30 days of 1H data = 720 candles → 2 paginated calls per coin
+                # Each klines call = weight 2 (limit=500), so 4 weight per coin
+                # 527 coins × 2.5s avg = ~22 min total, well under 60 min limit
                 if scanned > 1:
-                    time.sleep(random.uniform(0.3, 0.6))
+                    time.sleep(random.uniform(2.0, 3.0))
                 
                 # Get scan data for this symbol
                 alt_data = self._get_scan_data(symbol)
@@ -226,17 +226,17 @@ class DataFetcher:
             }
     
     def _get_scan_data(self, symbol: str) -> list:
-        """Fetch approximately 14 days of 1H data for a symbol.
+        """Fetch approximately 30 days of 1H data for a symbol.
         
-        14 days (336 candles) is statistically sufficient for correlation/beta
-        calculation while being much faster than 30 days. Also reduces the
-        chance of hitting API timeouts on low-liquidity coins.
+        30 days (720 candles) gives statistically robust correlation/beta
+        calculation. Uses get_all_klines_range with limit=500 (API weight 2)
+        so 30 days requires 2 paginated calls per coin (4 weight total).
         
         The underlying Binance client has REQUEST_TIMEOUT=15s with 3 retries,
         so a failing coin will timeout in ~45s max and be skipped gracefully.
         """
         now = int(time.time() * 1000)
-        start = now - (14 * 24 * 60 * 60 * 1000)  # 14 days ago
+        start = now - (30 * 24 * 60 * 60 * 1000)  # 30 days ago
         try:
             candles = self.client.get_all_klines_range(symbol, '1h', start, now)
             return candles
