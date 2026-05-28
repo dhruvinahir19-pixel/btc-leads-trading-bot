@@ -51,19 +51,40 @@ class SignalGenerator:
     
     def get_latest_btc_candle(self) -> Optional[dict]:
         """
-        Get the most recent COMPLETED BTC 1H candle.
-        We check for the candle that closed at xx:30 IST.
-        
+        Get the most recent COMPLETED BTC 1H candle using time-based calculation.
+
+        ⚠️ FIXED: Was using candles[-2] which returns WRONG candle when Binance
+        returns < 3 candles (possible at exact hour boundaries). Now calculates
+        the exact candle timestamp to fetch the right one every time.
+
+        At each hour boundary (XX:00 UTC), the BTC 1H candle from
+        (XX-1):00 to XX:00 UTC has just completed. This method calculates
+        that exact candle's open timestamp and fetches it directly.
+
         Returns:
             Candle dict with keys: ts, o, h, l, c, v
             Or None if unable to fetch.
         """
         try:
-            # Fetch last 3 candles to ensure we get the completed one
-            candles = self.client.get_klines('BTCUSDT', '1h', limit=3)
-            if not candles:
+            now_utc = datetime.now(timezone.utc)
+            current_hour_start = now_utc.replace(minute=0, second=0, microsecond=0)
+            # The most recently completed candle opened at (current_hour_start - 1 hour)
+            target_open_ms = int((current_hour_start - timedelta(hours=1)).timestamp() * 1000)
+
+            candle = self.client.get_klines(
+                'BTCUSDT', '1h',
+                start_time=target_open_ms,
+                limit=1
+            )
+            if not candle:
+                # Edge case: candle data not yet available (rare at exact boundary)
+                log_event('WARNING', 'signal',
+                          f"No BTC candle found at target UTC open "
+                          f"{current_hour_start - timedelta(hours=1)}. "
+                          f"Will retry next cycle.")
                 return None
-            return candles[-2]  # Second-to-last is the most recent completed candle
+
+            return candle[0]
         except Exception as e:
             log_event('ERROR', 'signal', f"Failed to fetch BTC candle: {e}")
             return None
@@ -85,49 +106,57 @@ class SignalGenerator:
         candle = self.get_latest_btc_candle()
         if not candle:
             return None
-        
-        candle_ts = candle['ts']
-        candle_close_ist = to_ist_timestamp(candle_ts)
-        
+
+        # candle['ts'] = open time in UTC (Binance klines convention)
+        candle_open_utc_ts = candle['ts']
+        # Convert to IST for display and dedup key (stored as "YYYY-MM-DD HH:MM:SS")
+        candle_ist = to_ist_timestamp(candle_open_utc_ts)
+
         # Check if already processed (prevents duplicate triggers)
-        if PositionState.is_btc_candle_processed(candle_close_ist):
+        if PositionState.is_btc_candle_processed(candle_ist):
             return None
-        
+
         # Get previous candle for return calculation
-        prev_candle_ts = candle_ts - 3600000  # 1 hour earlier
+        prev_candle_open_ts = candle_open_utc_ts - 3600000  # 1 hour earlier
         try:
             prev_candle = self.client.get_klines(
                 'BTCUSDT', '1h',
-                start_time=prev_candle_ts,
+                start_time=prev_candle_open_ts,
                 limit=1
             )
             if not prev_candle:
-                log_event('WARNING', 'signal', f"No previous candle found for {candle_close_ist}")
+                log_event('WARNING', 'signal', f"No previous candle found for {candle_ist}")
                 return None
             prev_close = prev_candle[0]['c']
         except Exception as e:
             log_event('ERROR', 'signal', f"Failed to fetch previous BTC candle: {e}")
             return None
-        
-        # Calculate BTC return
+
+        # Calculate BTC return (close-to-close of consecutive 1H candles)
         btc_return = (candle['c'] - prev_close) / prev_close * 100
-        
-        # Mark candle as processed (even if no trigger - don't re-check)
-        PositionState.mark_btc_candle_processed(candle_close_ist)
-        
-        # Check trigger condition
-        if abs(btc_return) < BTC_TRIGGER_PCT:
-            return None
-        
-        side = 'LONG' if btc_return > 0 else 'SHORT'
-        
+
+        # ── Log EVERY candle check with full details (for debugging) ──
+        trigger_flag = abs(btc_return) >= BTC_TRIGGER_PCT
         log_event('INFO', 'signal',
-                  f"TRIGGER: BTC {btc_return:+.2f}% at {candle_close_ist} ({side})")
-        
+                  f"Candle {candle_ist}: BTC={candle['c']:.2f} "
+                  f"(O={candle['o']:.2f} H={candle['h']:.2f} L={candle['l']:.2f}) "
+                  f"PrevClose={prev_close:.2f} "
+                  f"Return={btc_return:+.2f}% "
+                  f"|{'🔥 TRIGGER!' if trigger_flag else 'no trigger'}")
+
+        # Mark candle as processed (even if no trigger - don't re-check)
+        PositionState.mark_btc_candle_processed(candle_ist)
+
+        # Check trigger condition
+        if not trigger_flag:
+            return None
+
+        side = 'LONG' if btc_return > 0 else 'SHORT'
+
         # We generate the signal but don't choose which coin here
         # The caller (trading engine) decides which coin(s) to trade
         return Signal(
-            trigger_time_ist=candle_close_ist,
+            trigger_time_ist=candle_ist,
             side=side,
             btc_return_pct=btc_return,
             btc_close=candle['c'],
@@ -148,14 +177,12 @@ class SignalGenerator:
         Returns:
             Dict of coin_symbol -> {'entry': price, 'tp': price, 'sl': price}
         """
-        # Get the candle at the trigger time for each coin
-        # The trigger time is the candle close time
-        # We need to find the 1H candle for each coin at that time
-        
+        # trigger_time_ist stores the candle's OPEN time in IST (see check_trigger).
+        # Using the open time is intentional: fetching the 1H candle by its open time
+        # gives us candle[0]['c'] which is the candle's CLOSE price — the price at
+        # the moment the signal triggered (when the candle closed).
         trigger_ts = 0
-        # Convert IST trigger time back to UTC timestamp
         try:
-            from datetime import datetime
             ist_dt = datetime.strptime(signal.trigger_time_ist, "%Y-%m-%d %H:%M:%S")
             utc_dt = ist_dt - timedelta(hours=5.5)
             trigger_ts = int(utc_dt.timestamp() * 1000)
