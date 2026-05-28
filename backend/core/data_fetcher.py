@@ -213,6 +213,21 @@ class DataFetcher:
                 'elapsed_seconds': elapsed,
             }
         
+        except BinanceError as e:
+            if getattr(e, 'status_code', None) == 418:
+                log_event('WARNING', 'scanner',
+                          "Scan aborted: IP banned by Binance. Will retry on next scheduled scan.")
+            else:
+                log_event('ERROR', 'scanner', f"Scan failed: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'scanned': 0,
+                'liquid': 0,
+                'candidates': 0,
+                'top_coins': [],
+                'elapsed_seconds': 0,
+            }
         except Exception as e:
             log_event('ERROR', 'scanner', f"Scan failed: {e}")
             return {
@@ -234,14 +249,23 @@ class DataFetcher:
         
         The underlying Binance client has REQUEST_TIMEOUT=15s with 3 retries,
         so a failing coin will timeout in ~45s max and be skipped gracefully.
+        
+        IMPORTANT: On 418 (IP banned), raises BinanceError immediately.
+        Caller should check for this and abort the scan.
         """
         now = int(time.time() * 1000)
         start = now - (30 * 24 * 60 * 60 * 1000)  # 30 days ago
         try:
             candles = self.client.get_all_klines_range(symbol, '1h', start, now)
             return candles
-        except Exception as e:
+        except BinanceError as e:
+            if getattr(e, 'status_code', None) == 418:
+                # IP banned — re-raise so the scanner can abort
+                raise
             # Log which coin failed (helps debug scanner hangs)
+            log_event('WARNING', 'scanner', f"Skipping {symbol}: {e}")
+            return []
+        except Exception as e:
             log_event('WARNING', 'scanner', f"Skipping {symbol}: {e}")
             return []
     
