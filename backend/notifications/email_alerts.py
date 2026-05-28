@@ -339,7 +339,11 @@ class EmailNotifier:
     def _send(self, subject: str, html_body: str) -> bool:
         """
         Send an HTML email via SMTP.
-        Returns True if sent, False on failure (logged).
+        Returns True if sent, False on failure (logged as WARNING).
+        
+        Email failures are intentionally logged as WARNING (not ERROR)
+        because they never affect trading — the bot continues running
+        normally even if SMTP is down or misconfigured.
         """
         try:
             msg = MIMEMultipart('alternative')
@@ -362,13 +366,13 @@ class EmailNotifier:
             return True
 
         except smtplib.SMTPAuthenticationError:
-            log_event('ERROR', 'email',
+            log_event('WARNING', 'email',
                       "SMTP auth failed — check SMTP_EMAIL/SMTP_PASSWORD in .env")
         except smtplib.SMTPException as e:
-            log_event('ERROR', 'email',
+            log_event('WARNING', 'email',
                       f"SMTP error sending '{subject[:40]}': {e}")
         except Exception as e:
-            log_event('ERROR', 'email',
+            log_event('WARNING', 'email',
                       f"Failed to send '{subject[:40]}': {e}")
 
         return False

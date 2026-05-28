@@ -91,7 +91,7 @@ class DataFetcher:
             log_event('INFO', 'scanner', f"Found {len(all_symbols)} USDT perpetual pairs")
             
             # Step 2: Get BTC 30-day 1H data
-            btc_data = self._get_30day_data('BTCUSDT')
+            btc_data = self._get_scan_data('BTCUSDT')
             if not btc_data:
                 raise Exception("Failed to fetch BTC reference data")
             
@@ -118,8 +118,8 @@ class DataFetcher:
                 if symbol == 'BTCUSDT':
                     continue
                 
-                # Get 30-day data for this symbol
-                alt_data = self._get_30day_data(symbol)
+                # Get scan data for this symbol
+                alt_data = self._get_scan_data(symbol)
                 if not alt_data or len(alt_data) < 100:
                     continue
                 
@@ -217,14 +217,24 @@ class DataFetcher:
                 'elapsed_seconds': 0,
             }
     
-    def _get_30day_data(self, symbol: str) -> list:
-        """Fetch approximately 30 days of 1H data for a symbol."""
+    def _get_scan_data(self, symbol: str) -> list:
+        """Fetch approximately 14 days of 1H data for a symbol.
+        
+        14 days (336 candles) is statistically sufficient for correlation/beta
+        calculation while being much faster than 30 days. Also reduces the
+        chance of hitting API timeouts on low-liquidity coins.
+        
+        The underlying Binance client has REQUEST_TIMEOUT=15s with 3 retries,
+        so a failing coin will timeout in ~45s max and be skipped gracefully.
+        """
         now = int(time.time() * 1000)
-        start = now - (30 * 24 * 60 * 60 * 1000)  # 30 days ago
+        start = now - (14 * 24 * 60 * 60 * 1000)  # 14 days ago
         try:
             candles = self.client.get_all_klines_range(symbol, '1h', start, now)
             return candles
-        except Exception:
+        except Exception as e:
+            # Log which coin failed (helps debug scanner hangs)
+            log_event('WARNING', 'scanner', f"Skipping {symbol}: {e}")
             return []
     
     def _calculate_returns(self, candles: list) -> list:
