@@ -118,10 +118,22 @@ class BinanceClient:
                 body = e.read().decode('utf-8', errors='replace')
                 last_error = BinanceError(e.code, body)
                 
-                # Rate limit (429) or server error (5xx) -> retry
+                # Rate limit (429) or IP banned (418) or server error (5xx) -> retry
                 if e.code in (408, 429, 418, 500, 502, 503, 504):
                     if attempt < MAX_RETRIES - 1:
-                        time.sleep(RETRY_DELAY * (attempt + 1))
+                        # Parse Retry-After header if present (Binance sends it on 418/429)
+                        retry_after = e.headers.get('Retry-After')
+                        if retry_after:
+                            try:
+                                wait = int(retry_after)
+                            except (ValueError, TypeError):
+                                wait = RETRY_DELAY * (attempt + 1)
+                            else:
+                                _log_warning('binance',
+                                             f"Rate limited. Waiting {wait}s (Retry-After header)")
+                            time.sleep(wait)
+                        else:
+                            time.sleep(RETRY_DELAY * (attempt + 1))
                         continue
                 else:
                     # Other errors (400, 401, 403) -> don't retry
@@ -200,6 +212,10 @@ class BinanceClient:
         """
         Get all klines in a time range, handling pagination.
         
+        Uses limit=500 instead of max 1500 to keep per-call API weight
+        at 2 (vs 10 for limit>1000). This prevents IP bans from
+        rate limiting during the weekly 527-coin scan.
+        
         Args:
             symbol: e.g., 'BTCUSDT'
             interval: '1h', '4h', etc.
@@ -214,14 +230,14 @@ class BinanceClient:
         
         while current < end_time:
             candles = self.get_klines(symbol, interval, start_time=current,
-                                      end_time=end_time, limit=1500)
+                                      end_time=end_time, limit=500)
             if not candles:
                 break
             all_candles.extend(candles)
             current = candles[-1]['ts'] + 1
-            # Rate limit courtesy delay
+            # Rate limit courtesy delay between paginated calls
             if current < end_time:
-                time.sleep(0.1)
+                time.sleep(0.2)
         
         return all_candles
     
