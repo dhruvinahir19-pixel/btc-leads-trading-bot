@@ -24,6 +24,44 @@ MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
 REQUEST_TIMEOUT = 15
 
+# ─── Global IP ban state ───────────────────────────────────
+# When Binance bans our IP (HTTP 418), ALL requests will fail until the ban lifts.
+# Cache the ban expiry here so we can short-circuit requests without waiting.
+_ip_banned_until: float = 0.0  # Unix timestamp; 0 = not banned
+
+
+def _check_banned():
+    """Check if IP is currently banned. If so, raise BinanceError immediately.
+    
+    This short-circuits ALL Binance API calls when the IP is banned,
+    preventing the bot from freezing on every single request.
+    """
+    global _ip_banned_until
+    if _ip_banned_until > time.time():
+        remaining = int(_ip_banned_until - time.time())
+        body = ('{"code":-1003,"msg":"IP banned until ' +
+                str(_ip_banned_until) + '. Retry after ' + str(remaining) + 's"}')
+        raise BinanceError(418, body)
+    # Ban expired or never set — reset to 0
+    _ip_banned_until = 0.0
+
+
+def _set_banned(retry_after_seconds: int):
+    """Set the global IP ban state.
+    
+    Once set, ALL subsequent Binance API calls will be short-circuited
+    until the ban duration expires. This prevents the bot from making
+    hundreds of failing requests (each waiting ~1.5h for retries).
+    """
+    global _ip_banned_until
+    ban_until = time.time() + retry_after_seconds
+    # Only update if this is a newer/longer ban (use the longest one)
+    if ban_until > _ip_banned_until:
+        _ip_banned_until = ban_until
+        _log_warning('binance',
+                     f"IP BANNED until {time.strftime('%H:%M:%S UTC', time.gmtime(ban_until))} "
+                     f"({retry_after_seconds}s). All Binance calls paused until ban lifts.")
+
 
 def _log_warning(symbol: str, message: str):
     """Simple logger for the API client (avoids circular imports)."""
@@ -78,7 +116,17 @@ class BinanceClient:
     
     def _request(self, method: str, path: str, params: Optional[dict] = None,
                  signed: bool = False) -> dict:
-        """Make an HTTP request to Binance API with retry logic."""
+        """Make an HTTP request to Binance API with retry logic.
+        
+        Key behaviors:
+        - Checks global IP ban state FIRST — short-circuits if banned
+        - On 418 (IP banned): sets global ban state, raises immediately (no retry)
+        - On 429 (rate limited): reads Retry-After header, waits, retries
+        - On 5xx: standard retry with backoff
+        """
+        # ── Check global IP ban state before making any request ──
+        _check_banned()
+        
         url = f"{self.base_url}{path}"
         headers = {
             'User-Agent': 'Mozilla/5.0',
@@ -118,10 +166,21 @@ class BinanceClient:
                 body = e.read().decode('utf-8', errors='replace')
                 last_error = BinanceError(e.code, body)
                 
-                # Rate limit (429) or IP banned (418) or server error (5xx) -> retry
-                if e.code in (408, 429, 418, 500, 502, 503, 504):
+                if e.code == 418:
+                    # ── IP BANNED — do NOT retry ──
+                    # IP bans last minutes/hours. Retrying would freeze the
+                    # bot for hours. Set global ban state and raise immediately.
+                    retry_after = e.headers.get('Retry-After')
+                    if retry_after:
+                        try:
+                            _set_banned(int(retry_after))
+                        except (ValueError, TypeError):
+                            pass
+                    raise last_error
+                
+                elif e.code == 429:
+                    # ── Rate limited — read Retry-After, wait, retry ──
                     if attempt < MAX_RETRIES - 1:
-                        # Parse Retry-After header if present (Binance sends it on 418/429)
                         retry_after = e.headers.get('Retry-After')
                         if retry_after:
                             try:
@@ -135,9 +194,19 @@ class BinanceClient:
                         else:
                             time.sleep(RETRY_DELAY * (attempt + 1))
                         continue
-                else:
-                    # Other errors (400, 401, 403) -> don't retry
-                    break
+                
+                elif e.code in (408, 500, 502, 503, 504):
+                    # ── Server errors — standard retry ──
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_DELAY * (attempt + 1))
+                        continue
+                
+                # Other errors (400, 401, 403) -> don't retry
+                break
+            
+            except BinanceError:
+                # Re-raise our own exceptions (already handled above)
+                raise
             
             except (urllib.error.URLError, TimeoutError, OSError) as e:
                 last_error = BinanceError(0, str(e))
