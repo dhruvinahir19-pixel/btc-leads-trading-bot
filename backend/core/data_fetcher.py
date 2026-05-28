@@ -4,6 +4,7 @@ Handles candle fetching, weekly coin scanning, and data caching.
 """
 import time
 import json
+import random
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -117,6 +118,13 @@ class DataFetcher:
                 # Skip BTC itself
                 if symbol == 'BTCUSDT':
                     continue
+                
+                # Rate limit: wait 300-600ms between coins to avoid IP ban
+                # Binance Futures limit is 1200 weight/minute
+                # Each klines call = weight 10 (limit=1500) or weight 2 (limit=500)
+                # This delay spreads calls across ~5 min, well under the limit
+                if scanned > 1:
+                    time.sleep(random.uniform(0.3, 0.6))
                 
                 # Get scan data for this symbol
                 alt_data = self._get_scan_data(symbol)
