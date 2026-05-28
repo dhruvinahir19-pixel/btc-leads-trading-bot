@@ -105,7 +105,7 @@ IN_TRADE_CHECK_OFFSET = env_int("IN_TRADE_CHECK_OFFSET", 2)  # xx:xx:02 start
 SCAN_DAY = env_int("SCAN_DAY", 6)          # 6 = Sunday (0=Mon, 6=Sun)
 SCAN_HOUR = env_int("SCAN_HOUR", 0)        # 00:00 IST Sunday
 SCAN_MAX_SYMBOLS = env_int("SCAN_MAX_SYMBOLS", 645)
-SCAN_DURATION_MINUTES = env_int("SCAN_DURATION_MINUTES", 30)  # 30 min for full scan
+SCAN_DURATION_MINUTES = env_int("SCAN_DURATION_MINUTES", 60)  # 60 min for full scan (30d data w/ 2-3s rate-limit delay)
 
 # ─── Fixed Coins (always included) ──────────────────────────
 FIXED_COINS = env("FIXED_COINS", "ETHUSDT,DOGEUSDT").split(",")
