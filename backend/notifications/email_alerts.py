@@ -1,26 +1,37 @@
 """
 emil_alerts.py - Email notification service for the trading bot.
 Sends transactional emails for trade events, risk alerts, and errors.
-Uses Python's built-in smtplib with no external dependencies.
+Supports two delivery methods (tried in order):
+  1. SendGrid HTTP API (works on Render — uses HTTPS/443)
+  2. SMTP (requires port 587/465 access, may be blocked on Render free tier)
 
 Configuration (from .env):
-    SMTP_EMAIL     - Sender email address
-    SMTP_PASSWORD  - SMTP app password
-    SMTP_TO        - Recipient email address
-    SMTP_HOST      - SMTP server host (default: smtp.gmail.com)
-    SMTP_PORT      - SMTP server port (default: 587)
+    SendGrid API (preferred for Render):
+        SENDGRID_API_KEY - API key from sendgrid.com (free tier: 100 emails/day)
+        SMTP_EMAIL       - Sender email address
+        SMTP_TO          - Recipient email address
+    
+    SMTP (fallback):
+        SMTP_EMAIL     - Sender email address
+        SMTP_PASSWORD  - SMTP app password
+        SMTP_TO        - Recipient email address
+        SMTP_HOST      - SMTP server host (default: smtp.gmail.com)
+        SMTP_PORT      - SMTP server port (default: 587)
 """
 import os
+import json
 import smtplib
 import ssl
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Any, List
+from urllib.request import Request, urlopen
+from urllib.error import URLError
 
 from backend.config import (
     SMTP_EMAIL, SMTP_PASSWORD, SMTP_TO,
-    SMTP_HOST, SMTP_PORT,
+    SMTP_HOST, SMTP_PORT, SENDGRID_API_KEY,
     POSITION_SIZE_USDT, MAX_DAILY_LOSS_USDT,
     BTC_TRIGGER_PCT, TP_PCT, SL_PCT,
 )
@@ -30,20 +41,25 @@ from backend.database.db import log_event
 class EmailNotifier:
     """
     Sends email alerts for bot events.
-    Gracefully handles missing SMTP config — silently skips if not configured.
+    Supports SendGrid HTTP API (preferred for Render) and SMTP as fallback.
+    Gracefully handles missing config — silently skips if not configured.
     """
 
     def __init__(self):
         # Check env vars at runtime so tests and runtime config changes take effect
-        self._configured = all([
-            os.environ.get("SMTP_EMAIL", ""),
-            os.environ.get("SMTP_PASSWORD", ""),
-            os.environ.get("SMTP_TO", ""),
-        ])
+        self._sg_key = os.environ.get("SENDGRID_API_KEY", "")
+        self._smtp_email = os.environ.get("SMTP_EMAIL", "")
+        self._smtp_password = os.environ.get("SMTP_PASSWORD", "")
+        self._smtp_to = os.environ.get("SMTP_TO", "")
+        
+        # Configured if we have sender + recipient + either SendGrid key or SMTP password
+        self._configured = bool(self._smtp_email and self._smtp_to) and bool(
+            self._sg_key or self._smtp_password
+        )
 
     @property
     def is_configured(self) -> bool:
-        """Check if SMTP is fully configured."""
+        """Check if any email delivery method is configured."""
         return self._configured
 
     # ─── Public Alert Methods ─────────────────────────────────
@@ -334,24 +350,84 @@ class EmailNotifier:
 
         return self._send(subject, body)
 
-    # ─── SMTP Sending ─────────────────────────────────────────
+    # ─── Email Delivery ────────────────────────────────────────
 
     def _send(self, subject: str, html_body: str) -> bool:
         """
-        Send an HTML email via SMTP.
+        Send an HTML email. Tries delivery methods in order:
+        1. SendGrid HTTP API (if SENDGRID_API_KEY is set — works on Render)
+        2. SMTP (if SMTP_PASSWORD is set — may be blocked on Render free tier)
+        
         Returns True if sent, False on failure (logged as WARNING).
         
         Email failures are intentionally logged as WARNING (not ERROR)
         because they never affect trading — the bot continues running
-        normally even if SMTP is down or misconfigured.
+        normally even if email is down or misconfigured.
+        """
+        # Try SendGrid API first (preferred — works over HTTPS/443)
+        if self._sg_key:
+            return self._send_via_sendgrid(subject, html_body)
+        
+        # Fall back to SMTP
+        return self._send_via_smtp(subject, html_body)
+
+    def _send_via_sendgrid(self, subject: str, html_body: str) -> bool:
+        """
+        Send email via SendGrid v3 Mail Send API (HTTPS/443).
+        This works on Render because it uses standard HTTPS, not SMTP.
         """
         try:
+            plain_text = self._strip_html(html_body)
+            payload = json.dumps({
+                "personalizations": [{"to": [{"email": self._smtp_to}]}],
+                "from": {"email": self._smtp_email},
+                "subject": subject,
+                "content": [
+                    {"type": "text/plain", "value": plain_text},
+                    {"type": "text/html", "value": html_body},
+                ],
+            }).encode('utf-8')
+
+            req = Request(
+                "https://api.sendgrid.com/v3/mail/send",
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {self._sg_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            with urlopen(req, timeout=15) as resp:
+                if resp.status == 202:
+                    log_event('INFO', 'email', f"Sent via SendGrid: {subject}")
+                    return True
+                else:
+                    log_event('WARNING', 'email',
+                              f"SendGrid returned status {resp.status} for '{subject[:40]}'")
+                    return False
+        except URLError as e:
+            log_event('WARNING', 'email',
+                      f"SendGrid network error sending '{subject[:40]}': {e}")
+        except (TypeError, ValueError) as e:
+            log_event('WARNING', 'email',
+                      f"SendGrid encoding error: {e}")
+        except Exception as e:
+            log_event('WARNING', 'email',
+                      f"SendGrid failed to send '{subject[:40]}': {e}")
+        return False
+
+    def _send_via_smtp(self, subject: str, html_body: str) -> bool:
+        """
+        Send email via SMTP as fallback.
+        May fail on Render free tier which blocks outbound SMTP ports.
+        """
+        if not self._smtp_password:
+            return False
+        try:
             msg = MIMEMultipart('alternative')
-            msg['From'] = SMTP_EMAIL
-            msg['To'] = SMTP_TO
+            msg['From'] = self._smtp_email
+            msg['To'] = self._smtp_to
             msg['Subject'] = subject
 
-            # Plain text fallback
             plain_text = self._strip_html(html_body)
             msg.attach(MIMEText(plain_text, 'plain', 'utf-8'))
             msg.attach(MIMEText(html_body, 'html', 'utf-8'))
@@ -359,10 +435,10 @@ class EmailNotifier:
             context = ssl.create_default_context()
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
                 server.starttls(context=context)
-                server.login(SMTP_EMAIL, SMTP_PASSWORD)
-                server.sendmail(SMTP_EMAIL, SMTP_TO, msg.as_string())
+                server.login(self._smtp_email, self._smtp_password)
+                server.sendmail(self._smtp_email, self._smtp_to, msg.as_string())
 
-            log_event('INFO', 'email', f"Sent: {subject}")
+            log_event('INFO', 'email', f"Sent via SMTP: {subject}")
             return True
 
         except smtplib.SMTPAuthenticationError:
@@ -371,9 +447,14 @@ class EmailNotifier:
         except smtplib.SMTPException as e:
             log_event('WARNING', 'email',
                       f"SMTP error sending '{subject[:40]}': {e}")
+        except OSError as e:
+            # [Errno 101] Network is unreachable — Render blocks SMTP
+            log_event('WARNING', 'email',
+                      f"SMTP network error (port {SMTP_PORT} blocked?): {e}. "
+                      f"Set SENDGRID_API_KEY in .env to use HTTPS-based email.")
         except Exception as e:
             log_event('WARNING', 'email',
-                      f"Failed to send '{subject[:40]}': {e}")
+                      f"SMTP failed to send '{subject[:40]}': {e}")
 
         return False
 

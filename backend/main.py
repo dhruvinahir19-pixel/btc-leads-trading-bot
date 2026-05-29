@@ -496,8 +496,9 @@ def api_config():
     from backend.config import (
         BTC_TRIGGER_PCT, TP_PCT, SL_PCT, WINDOW_BARS,
         POSITION_SIZE_USDT, MAX_COINS_PER_TRADE,
-        MAX_DAILY_LOSS_USDT, FIXED_COINS, TRADING_COINS,
+        MAX_DAILY_LOSS_USDT, FIXED_COINS,
     )
+    from backend.state.state_manager import WeeklyScanState
     return {
         "btc_trigger_pct": BTC_TRIGGER_PCT,
         "tp_pct": TP_PCT,
@@ -507,7 +508,7 @@ def api_config():
         "max_coins_per_trade": MAX_COINS_PER_TRADE,
         "max_daily_loss_usdt": MAX_DAILY_LOSS_USDT,
         "fixed_coins": FIXED_COINS,
-        "trading_coins": TRADING_COINS,
+        "trading_coins": WeeklyScanState.get_trading_coins(),
         "demo_api_configured": bool(BINANCE_DEMO_KEY),
         "smtp_configured": bool(SMTP_EMAIL),
     }

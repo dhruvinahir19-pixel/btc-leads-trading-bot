@@ -115,12 +115,18 @@ TOP_DYNAMIC_COINS = env_int("TOP_DYNAMIC_COINS", 3)  # Top 3 from weekly scan
 # Will be populated by weekly scan + fixed coins
 TRADING_COINS = list(FIXED_COINS)  # Start with fixed coins
 
-# ─── Alerts (Email via SMTP) ─────────────────────────────────
+# ─── Alerts (Email via SMTP or SendGrid HTTP API) ────────────
+# Option 1: SMTP (may be blocked on Render free tier)
 SMTP_EMAIL = env("SMTP_EMAIL", "")
 SMTP_PASSWORD = env("SMTP_PASSWORD", "")
 SMTP_TO = env("SMTP_TO", "")
 SMTP_HOST = env("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = env_int("SMTP_PORT", 587)
+
+# Option 2: SendGrid HTTP API (works on Render because it uses HTTPS/443)
+# Sign up at sendgrid.com for free tier (100 emails/day)
+# Create API key and set it here
+SENDGRID_API_KEY = env("SENDGRID_API_KEY", "")
 
 # ─── Market Hours (only trade during these) ──────────────────
 TRADE_START_HOUR = env_int("TRADE_START_HOUR", 0)    # 24h format
