@@ -33,7 +33,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Any, List
 from urllib.request import Request, urlopen
-from urllib.error import URLError
+from urllib.error import URLError, HTTPError
 
 from backend.config import (
     SMTP_EMAIL, SMTP_PASSWORD, SMTP_TO,
@@ -400,7 +400,7 @@ class EmailNotifier:
                 "subject": subject,
                 "htmlContent": html_body,
                 "textContent": plain_text,
-            }).encode('utf-8')
+            }            ).encode('utf-8')
 
             req = Request(
                 "https://api.brevo.com/v3/smtp/email",
@@ -419,6 +419,16 @@ class EmailNotifier:
                     log_event('WARNING', 'email',
                               f"Brevo returned status {resp.status} for '{subject[:40]}'")
                     return False
+        except HTTPError as e:
+            body = e.read().decode('utf-8', errors='replace')[:200] if e.fp else ''
+            if e.code == 401:
+                log_event('WARNING', 'email',
+                          f"Brevo 401 Unauthorized: API key is invalid. "
+                          f"Regenerate your BREVO_API_KEY at brevo.com "
+                          f"and add it to Render environment variables.")
+            else:
+                log_event('WARNING', 'email',
+                          f"Brevo HTTP {e.code} for '{subject[:40]}': {body}")
         except URLError as e:
             log_event('WARNING', 'email',
                       f"Brevo network error sending '{subject[:40]}': {e}")
