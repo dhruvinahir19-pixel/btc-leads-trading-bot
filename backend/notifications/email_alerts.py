@@ -1,17 +1,23 @@
 """
 emil_alerts.py - Email notification service for the trading bot.
 Sends transactional emails for trade events, risk alerts, and errors.
-Supports two delivery methods (tried in order):
-  1. SendGrid HTTP API (works on Render — uses HTTPS/443)
-  2. SMTP (requires port 587/465 access, may be blocked on Render free tier)
+Supports multiple delivery methods (tried in order):
+  1. Brevo HTTP API (preferred — uses HTTPS/443, works on Render free tier)
+  2. SendGrid HTTP API (fallback — also uses HTTPS/443)
+  3. SMTP (last resort — requires port 587/465, blocked on Render free tier)
 
 Configuration (from .env):
-    SendGrid API (preferred for Render):
+    Brevo API (recommended for Render):
+        BREVO_API_KEY  - API key from brevo.com (free tier: 300 emails/day)
+        SMTP_EMAIL     - Sender email address
+        SMTP_TO        - Recipient email address
+    
+    SendGrid API (alternative HTTPS option):
         SENDGRID_API_KEY - API key from sendgrid.com (free tier: 100 emails/day)
         SMTP_EMAIL       - Sender email address
         SMTP_TO          - Recipient email address
     
-    SMTP (fallback):
+    SMTP (last resort):
         SMTP_EMAIL     - Sender email address
         SMTP_PASSWORD  - SMTP app password
         SMTP_TO        - Recipient email address
@@ -31,7 +37,7 @@ from urllib.error import URLError
 
 from backend.config import (
     SMTP_EMAIL, SMTP_PASSWORD, SMTP_TO,
-    SMTP_HOST, SMTP_PORT, SENDGRID_API_KEY,
+    SMTP_HOST, SMTP_PORT, SENDGRID_API_KEY, BREVO_API_KEY,
     POSITION_SIZE_USDT, MAX_DAILY_LOSS_USDT,
     BTC_TRIGGER_PCT, TP_PCT, SL_PCT,
 )
@@ -41,20 +47,21 @@ from backend.database.db import log_event
 class EmailNotifier:
     """
     Sends email alerts for bot events.
-    Supports SendGrid HTTP API (preferred for Render) and SMTP as fallback.
+    Supports Brevo HTTP API (preferred for Render), SendGrid HTTP API, and SMTP.
     Gracefully handles missing config — silently skips if not configured.
     """
 
     def __init__(self):
         # Check env vars at runtime so tests and runtime config changes take effect
+        self._brevo_key = os.environ.get("BREVO_API_KEY", "")
         self._sg_key = os.environ.get("SENDGRID_API_KEY", "")
         self._smtp_email = os.environ.get("SMTP_EMAIL", "")
         self._smtp_password = os.environ.get("SMTP_PASSWORD", "")
         self._smtp_to = os.environ.get("SMTP_TO", "")
         
-        # Configured if we have sender + recipient + either SendGrid key or SMTP password
+        # Configured if we have sender + recipient + any delivery method
         self._configured = bool(self._smtp_email and self._smtp_to) and bool(
-            self._sg_key or self._smtp_password
+            self._brevo_key or self._sg_key or self._smtp_password
         )
 
     @property
@@ -355,8 +362,9 @@ class EmailNotifier:
     def _send(self, subject: str, html_body: str) -> bool:
         """
         Send an HTML email. Tries delivery methods in order:
-        1. SendGrid HTTP API (if SENDGRID_API_KEY is set — works on Render)
-        2. SMTP (if SMTP_PASSWORD is set — may be blocked on Render free tier)
+        1. Brevo HTTP API (if BREVO_API_KEY is set — works on Render via HTTPS/443)
+        2. SendGrid HTTP API (if SENDGRID_API_KEY is set — also HTTPS/443)
+        3. SMTP (if SMTP_PASSWORD is set — may be blocked on Render free tier)
         
         Returns True if sent, False on failure (logged as WARNING).
         
@@ -364,12 +372,63 @@ class EmailNotifier:
         because they never affect trading — the bot continues running
         normally even if email is down or misconfigured.
         """
-        # Try SendGrid API first (preferred — works over HTTPS/443)
-        if self._sg_key:
-            return self._send_via_sendgrid(subject, html_body)
+        # 1. Brevo API (recommended — free tier: 300/day, works over HTTPS)
+        if self._brevo_key:
+            if self._send_via_brevo(subject, html_body):
+                return True
+            # If Brevo fails, try next method
         
-        # Fall back to SMTP
+        # 2. SendGrid API (fallback HTTPS option)
+        if self._sg_key:
+            if self._send_via_sendgrid(subject, html_body):
+                return True
+        
+        # 3. SMTP (last resort — blocked on Render free tier)
         return self._send_via_smtp(subject, html_body)
+
+    def _send_via_brevo(self, subject: str, html_body: str) -> bool:
+        """
+        Send email via Brevo (formerly Sendinblue) v3 SMTP API (HTTPS/443).
+        Free tier: 300 emails/day. Uses api-key header auth.
+        This works on Render because it uses standard HTTPS, not SMTP.
+        """
+        try:
+            plain_text = self._strip_html(html_body)
+            payload = json.dumps({
+                "sender": {"email": self._smtp_email},
+                "to": [{"email": self._smtp_to}],
+                "subject": subject,
+                "htmlContent": html_body,
+                "textContent": plain_text,
+            }).encode('utf-8')
+
+            req = Request(
+                "https://api.brevo.com/v3/smtp/email",
+                data=payload,
+                headers={
+                    "api-key": self._brevo_key,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            )
+            with urlopen(req, timeout=15) as resp:
+                if resp.status == 201:
+                    log_event('INFO', 'email', f"Sent via Brevo: {subject}")
+                    return True
+                else:
+                    log_event('WARNING', 'email',
+                              f"Brevo returned status {resp.status} for '{subject[:40]}'")
+                    return False
+        except URLError as e:
+            log_event('WARNING', 'email',
+                      f"Brevo network error sending '{subject[:40]}': {e}")
+        except (TypeError, ValueError) as e:
+            log_event('WARNING', 'email',
+                      f"Brevo encoding error: {e}")
+        except Exception as e:
+            log_event('WARNING', 'email',
+                      f"Brevo failed to send '{subject[:40]}': {e}")
+        return False
 
     def _send_via_sendgrid(self, subject: str, html_body: str) -> bool:
         """
@@ -451,7 +510,7 @@ class EmailNotifier:
             # [Errno 101] Network is unreachable — Render blocks SMTP
             log_event('WARNING', 'email',
                       f"SMTP network error (port {SMTP_PORT} blocked?): {e}. "
-                      f"Set SENDGRID_API_KEY in .env to use HTTPS-based email.")
+                      f"Set BREVO_API_KEY or SENDGRID_API_KEY in .env to use HTTPS-based email.")
         except Exception as e:
             log_event('WARNING', 'email',
                       f"SMTP failed to send '{subject[:40]}': {e}")

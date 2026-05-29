@@ -128,6 +128,11 @@ SMTP_PORT = env_int("SMTP_PORT", 587)
 # Create API key and set it here
 SENDGRID_API_KEY = env("SENDGRID_API_KEY", "")
 
+# Option 3: Brevo (formerly Sendinblue) HTTP API (also works on Render via HTTPS/443)
+# Sign up at brevo.com for free tier (300 emails/day)
+# Create API key and set it here
+BREVO_API_KEY = env("BREVO_API_KEY", "")
+
 # ─── Market Hours (only trade during these) ──────────────────
 TRADE_START_HOUR = env_int("TRADE_START_HOUR", 0)    # 24h format
 TRADE_END_HOUR = env_int("TRADE_END_HOUR", 23)
