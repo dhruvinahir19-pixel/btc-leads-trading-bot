@@ -672,13 +672,31 @@ def get_btc_price() -> float:
 # ─── Serve Frontend ──────────────────────────────────────
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-if STATIC_DIR.exists():
+_frontend_available = STATIC_DIR.exists()
+
+if _frontend_available:
     app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="static-assets")
+    logger.info(f"Frontend built at {STATIC_DIR}")
+else:
+    logger.warning(f"Frontend NOT BUILT — run 'cd frontend && npm run build' to build it")
 
-    @app.get("/")
-    def serve_index():
+
+@app.get("/", include_in_schema=False)
+def serve_index():
+    """Serve the frontend SPA, or return a health-like JSON for uptime monitors."""
+    if _frontend_available:
         return FileResponse(str(STATIC_DIR / "index.html"))
+    # Always return 200 so UptimeRobot / Render keepalive never sees 405
+    return JSONResponse(content={
+        "status": "ok",
+        "service": "BTC Leads Trading Bot",
+        "version": "1.0.0",
+        "frontend": "not built",
+        "health_endpoint": "/health",
+    })
 
+
+if _frontend_available:
     # Catch-all: serve index.html for any non-API, non-health path (SPA routing)
     @app.api_route("/{path:path}", methods=["GET"])
     async def catch_all(path: str):
@@ -689,11 +707,9 @@ if STATIC_DIR.exists():
         return FileResponse(str(STATIC_DIR / "index.html"))
 
     if IS_RENDER and RENDER_EXTERNAL_URL:
-        logger.info(f"Frontend: {RENDER_EXTERNAL_URL}/")
+        logger.info(f"Frontend URL: {RENDER_EXTERNAL_URL}/")
     else:
-        logger.info(f"Frontend: http://{HOST}:{PORT}/")
-else:
-    logger.warning(f"Frontend NOT BUILT (run 'cd frontend && npm run build')")
+        logger.info(f"Frontend URL: http://{HOST}:{PORT}/")
 
 
 # ─── Entry Point ──────────────────────────────────────────
