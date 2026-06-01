@@ -98,7 +98,7 @@ MAX_CONSECUTIVE_LOSSES = env_int("MAX_CONSECUTIVE_LOSSES", 5)
 # 1H candles close at xx:30 IST on Binance Futures
 CANDLE_CHECK_MINUTE = env_int("CANDLE_CHECK_MINUTE", 30)   # xx:30
 CANDLE_CHECK_SECOND = env_int("CANDLE_CHECK_SECOND", 2)    # xx:30:02
-IN_TRADE_CHECK_INTERVAL = env_int("IN_TRADE_CHECK_INTERVAL", 60)  # Every 60s when in trade
+IN_TRADE_CHECK_INTERVAL = env_int("IN_TRADE_CHECK_INTERVAL", 300)  # Every 5 min when in trade (was 60s — reduced to avoid IP bans)
 IN_TRADE_CHECK_OFFSET = env_int("IN_TRADE_CHECK_OFFSET", 2)  # xx:xx:02 start
 
 # ─── Weekly Coin Scan ────────────────────────────────────────

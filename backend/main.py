@@ -53,6 +53,11 @@ reconciliation = Reconciliation()
 risk_manager = RiskManager()
 _bot_started_at = datetime.now(timezone.utc)
 
+# ─── BTC Price Cache (avoids Binance calls on every dashboard load) ────
+# When banned, the cache returns the last known price instead of calling Binance.
+_btc_price_cache = {'price': 0.0, 'timestamp': 0.0}
+
+
 
 # ─── Application Lifecycle ─────────────────────────────────
 
@@ -274,6 +279,15 @@ def _start_scheduler():
 
 def check_btc_candle():
     """Check BTC candle for triggers. Runs every hour at xx:30:02 IST."""
+    from backend.api.binance import is_ip_banned, get_ban_info
+    
+    # ── Skip if Binance IP is banned ──
+    if is_ip_banned():
+        ban_info = get_ban_info()
+        log_event('WARNING', 'main',
+                  f'BTC check skipped: Binance IP banned for {ban_info["remaining"]}s more')
+        return
+    
     try:
         # Always check daily reset at start of each cycle
         from backend.state.state_manager import RiskState
@@ -308,8 +322,16 @@ def check_btc_candle():
 
 
 def monitor_positions():
-    """Monitor open positions. Runs every ~60 seconds."""
+    """Monitor open positions. Runs every ~5 minutes."""
     from backend.state.state_manager import PositionState, RiskState
+    from backend.api.binance import is_ip_banned, get_ban_info
+    
+    # ── Skip if Binance IP is banned ──
+    if is_ip_banned():
+        ban_info = get_ban_info()
+        log_event('WARNING', 'main',
+                  f'Monitor skipped: Binance IP banned for {ban_info["remaining"]}s more')
+        return
     
     # Check daily reset
     RiskState.check_and_reset_daily()
@@ -620,12 +642,31 @@ def api_trade_journal(
 # ─── Helper ────────────────────────────────────────────────
 
 def get_btc_price() -> float:
-    """Get current BTC price."""
+    """Get current BTC price with caching.
+    
+    Returns cached price (up to 60s old) to avoid hammering Binance
+    on every dashboard load. When Binance IP is banned, returns the
+    last known cached price instead of making a call that would fail.
+    """
+    global _btc_price_cache
+    
+    # Check if IP is banned — return cached price without attempting API call
+    from backend.api.binance import is_ip_banned
+    if is_ip_banned():
+        return _btc_price_cache.get('price', 0.0)
+    
+    # Serve cached price if fresh (< 60s old)
+    if time.time() - _btc_price_cache['timestamp'] < 60:
+        return _btc_price_cache['price']
+    
     try:
         from backend.api.binance import get_data_client
-        return get_data_client().get_ticker_price('BTCUSDT')
+        price = get_data_client().get_ticker_price('BTCUSDT')
+        _btc_price_cache['price'] = price
+        _btc_price_cache['timestamp'] = time.time()
+        return price
     except Exception:
-        return 0.0
+        return _btc_price_cache.get('price', 0.0)
 
 
 # ─── Serve Frontend ──────────────────────────────────────

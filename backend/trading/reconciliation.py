@@ -5,7 +5,7 @@ Detects and fixes: phantom trades, duplicate entries, missing exits.
 """
 from typing import Optional
 
-from backend.api.binance import get_demo_client
+from backend.api.binance import get_demo_client, is_ip_banned, get_ban_info
 from backend.database.db import (
     get_open_trades, trade_close, trade_cancel,
     log_event, config_get, config_set,
@@ -34,6 +34,16 @@ class Reconciliation:
         Returns:
             Dict with issues found and fixed
         """
+        # ── Skip if Binance IP is banned ──
+        if is_ip_banned():
+            return {
+                'checked': False,
+                'issues_found': 0,
+                'issues_fixed': 0,
+                'details': [],
+                'skipped': 'ip_banned',
+            }
+
         results = {
             'checked': True,
             'issues_found': 0,

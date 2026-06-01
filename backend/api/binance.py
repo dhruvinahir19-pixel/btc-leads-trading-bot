@@ -27,22 +27,93 @@ REQUEST_TIMEOUT = 15
 # ─── Global IP ban state ───────────────────────────────────
 # When Binance bans our IP (HTTP 418), ALL requests will fail until the ban lifts.
 # Cache the ban expiry here so we can short-circuit requests without waiting.
+# The ban state is ALSO stored in the database ('binance_banned_until' config key)
+# so it survives restarts and is shared across all gunicorn workers.
 _ip_banned_until: float = 0.0  # Unix timestamp; 0 = not banned
+
+
+def _load_ban_from_db():
+    """Load ban state from the database (shared across workers, survives restarts).
+    
+    Called at module init and periodically to sync with DB.
+    If the DB has a longer ban than in-memory, use the DB value.
+    If the in-memory state says banned but DB says not, trust DB (other
+    worker may have cleared it). If DB says banned but in-memory doesn't,
+    update in-memory.
+    """
+    global _ip_banned_until
+    try:
+        from backend.database.db import config_get
+        db_val = config_get('binance_banned_until', '')
+        if db_val:
+            db_ban_until = float(db_val)
+            if db_ban_until > time.time():
+                # DB says banned — use it (might be from another worker)
+                if db_ban_until > _ip_banned_until:
+                    _ip_banned_until = db_ban_until
+            else:
+                # DB ban expired — clear it
+                if _ip_banned_until > 0:
+                    _ip_banned_until = 0.0
+                from backend.database.db import config_set
+                config_set('binance_banned_until', '')
+    except Exception:
+        pass  # DB not available yet; use in-memory state
+
+
+def _save_ban_to_db():
+    """Persist current ban state to database.
+    
+    This ensures the ban state survives bot restarts and is shared
+    across all gunicorn workers (each worker has its own in-memory state).
+    """
+    global _ip_banned_until
+    try:
+        from backend.database.db import config_set
+        if _ip_banned_until > time.time():
+            config_set('binance_banned_until', str(_ip_banned_until))
+        else:
+            config_set('binance_banned_until', '')
+    except Exception:
+        pass  # DB not available; in-memory state only
 
 
 def _check_banned():
     """Check if IP is currently banned. If so, raise BinanceError immediately.
     
+    Checks BOTH in-memory state (fast path) and DB state (shared across workers).
     This short-circuits ALL Binance API calls when the IP is banned,
     preventing the bot from freezing on every single request.
+    
+    Also syncs ban expiry from DB periodically — if another worker
+    has a longer ban, this process will respect it.
     """
     global _ip_banned_until
+    
+    # ── Sync from DB every time we check (catches bans set by other workers) ──
+    try:
+        from backend.database.db import config_get
+        db_val = config_get('binance_banned_until', '')
+        if db_val:
+            db_ban_until = float(db_val)
+            if db_ban_until > time.time():
+                if db_ban_until > _ip_banned_until:
+                    _ip_banned_until = db_ban_until
+            else:
+                # DB ban expired
+                if _ip_banned_until > 0:
+                    _ip_banned_until = 0.0
+                from backend.database.db import config_set
+                config_set('binance_banned_until', '')
+    except Exception:
+        pass
+    
     if _ip_banned_until > time.time():
         remaining = int(_ip_banned_until - time.time())
         body = ('{"code":-1003,"msg":"IP banned until ' +
                 str(_ip_banned_until) + '. Retry after ' + str(remaining) + 's"}')
         raise BinanceError(418, body)
-    # Ban expired or never set — reset to 0
+    # Ban expired — reset to 0
     _ip_banned_until = 0.0
 
 
@@ -52,12 +123,16 @@ def _set_banned(retry_after_seconds: int):
     Once set, ALL subsequent Binance API calls will be short-circuited
     until the ban duration expires. This prevents the bot from making
     hundreds of failing requests (each waiting ~1.5h for retries).
+    
+    The ban state is also persisted to the database so it survives
+    restarts and is shared across all workers.
     """
     global _ip_banned_until
     ban_until = time.time() + retry_after_seconds
     # Only update if this is a newer/longer ban (use the longest one)
     if ban_until > _ip_banned_until:
         _ip_banned_until = ban_until
+        _save_ban_to_db()
         _log_warning('binance',
                      f"IP BANNED until {time.strftime('%H:%M:%S UTC', time.gmtime(ban_until))} "
                      f"({retry_after_seconds}s). All Binance calls paused until ban lifts.")
@@ -681,7 +756,48 @@ class BinanceClient:
         return round(rounded, precision)
 
 
+# ─── Public ban check (for scheduler) ──────────────────────
+
+def is_ip_banned() -> bool:
+    """Check if Binance IP ban is currently active.
+    
+    Public function that can be called by the scheduler or main.py
+    to skip Binance-dependent jobs (monitoring, BTC check, etc.).
+    Synces from DB so it reflects bans set by other workers.
+    
+    NOTE: This is a PURE boolean check — it does NOT raise BinanceError.
+    Unlike _check_banned() which raises on ban (for use inside _request()),
+    this function returns True/False so callers can handle bans gracefully.
+    
+    Returns:
+        True if the IP is currently banned (all Binance calls will fail)
+    """
+    global _ip_banned_until
+    # Sync from DB (catches bans set by other workers)
+    _load_ban_from_db()
+    return _ip_banned_until > time.time()
+
+
+def get_ban_info() -> dict:
+    """Get current ban state info (for diagnostics/logging).
+    
+    Returns:
+        Dict with 'banned' (bool), 'until' (unix ts or 0), 'remaining' (seconds or 0)
+    """
+    global _ip_banned_until
+    _load_ban_from_db()  # sync from DB
+    remaining = max(0, _ip_banned_until - time.time()) if _ip_banned_until > 0 else 0
+    return {
+        'banned': _ip_banned_until > time.time(),
+        'until': _ip_banned_until,
+        'remaining': int(remaining),
+    }
+
+
 # ─── Singleton instances ───────────────────────────────────
+
+# ── Load ban state from DB at module init ──
+_load_ban_from_db()
 
 _data_client: Optional[BinanceClient] = None
 _demo_client: Optional[BinanceClient] = None
