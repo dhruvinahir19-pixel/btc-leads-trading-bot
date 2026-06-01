@@ -53,6 +53,14 @@ reconciliation = Reconciliation()
 risk_manager = RiskManager()
 _bot_started_at = datetime.now(timezone.utc)
 
+# ─── Startup health flag ───────────────────────────────────
+# If ANY step of lifespan initialization fails, this flag is set to False
+# and the /health endpoint reports the degraded state instead of crashing.
+# The app ALWAYS serves requests, even with partial initialization.
+_startup_healthy = True
+_startup_errors: list[str] = []
+
+
 # ─── BTC Price Cache (avoids Binance calls on every dashboard load) ────
 # When banned, the cache returns the last known price instead of calling Binance.
 _btc_price_cache = {'price': 0.0, 'timestamp': 0.0}
@@ -66,55 +74,102 @@ async def lifespan(app: FastAPI):
     """Application startup/shutdown.
     Graceful shutdown is handled by uvicorn's built-in signal handlers.
     The shutdown section (after yield) runs automatically on SIGTERM/SIGINT.
+    
+    SAFETY: The ENTIRE startup is wrapped in try/except. Even if something
+    fails (DB corrupt, import error, network timeout), the app still starts
+    and serves requests in degraded mode. The /health endpoint reports
+    startup errors so you can diagnose without crashing.
     """
-    # Initialize structured logging
-    log_dir = BASE_DIR / "logs"
-    setup_logging(log_dir=log_dir, log_level=LOG_LEVEL)
+    global _startup_healthy, _startup_errors
+    _startup_errors = []
     
-    logger.info(f"{'='*60}")
-    logger.info(f"TRADING BOT v1.0 - Starting up")
-    logger.info(f"DB: {DB_PATH}")
-    logger.info(f"{'='*60}")
-    
-    # Initialize database
-    init_db()
-    log_event('INFO', 'main', 'Database initialized')
-    
-    # Show configuration
-    show_config()
-    
-    # Check for orphan positions from previous bot session
-    _check_orphan_positions()
-    
-    # Start scheduler
-    _start_scheduler()
-    
-    # Send startup email
-    config_summary = (
-        f"Trigger: {BTC_TRIGGER_PCT}% | TP: {TP_PCT}% | SL: {SL_PCT}% | "
-        f"Position: ${POSITION_SIZE_USDT:.0f} | Daily Loss Limit: ${MAX_DAILY_LOSS_USDT:.0f}"
-    )
-    notifier = get_notifier()
-    if notifier.is_configured:
-        notifier.send_startup("1.0.0", str(DB_PATH), config_summary)
-    
-    # Store notifier reference for shutdown
-    app.state.notifier = notifier
-    app.state.bot_started_at = _bot_started_at
-    
-    log_event('INFO', 'main', 'Bot started successfully')
-    logger.info("Bot started successfully")
+    try:
+        # Initialize structured logging
+        log_dir = BASE_DIR / "logs"
+        setup_logging(log_dir=log_dir, log_level=LOG_LEVEL)
+        
+        logger.info(f"{'='*60}")
+        logger.info(f"TRADING BOT v1.0 - Starting up")
+        logger.info(f"DB: {DB_PATH}")
+        logger.info(f"{'='*60}")
+        
+        # Initialize database
+        try:
+            init_db()
+            log_event('INFO', 'main', 'Database initialized')
+        except Exception as e:
+            err = f"DB init failed: {e}"
+            _startup_errors.append(err)
+            print(f"[FATAL] {err}", file=sys.stderr)
+        
+        # Show configuration (safe — just prints)
+        try:
+            show_config()
+        except Exception as e:
+            _startup_errors.append(f"show_config failed: {e}")
+        
+        # Check for orphan positions from previous bot session
+        try:
+            _check_orphan_positions()
+        except Exception as e:
+            _startup_errors.append(f"Orphan check failed: {e}")
+        
+        # Start scheduler
+        try:
+            _start_scheduler()
+        except Exception as e:
+            _startup_errors.append(f"Scheduler start failed: {e}")
+        
+        # Send startup email
+        try:
+            config_summary = (
+                f"Trigger: {BTC_TRIGGER_PCT}% | TP: {TP_PCT}% | SL: {SL_PCT}% | "
+                f"Position: ${POSITION_SIZE_USDT:.0f} | Daily Loss Limit: ${MAX_DAILY_LOSS_USDT:.0f}"
+            )
+            notifier = get_notifier()
+            app.state.notifier = notifier
+            if notifier.is_configured:
+                notifier.send_startup("1.0.0", str(DB_PATH), config_summary)
+        except Exception as e:
+            _startup_errors.append(f"Startup email failed: {e}")
+        
+        # Store bot started timestamp
+        app.state.bot_started_at = _bot_started_at
+        
+        # ── Determine overall health ──
+        if _startup_errors:
+            _startup_healthy = False
+            print(f"[WARNING] Startup completed with {len(_startup_errors)} error(s):", file=sys.stderr)
+            for err in _startup_errors:
+                print(f"  - {err}", file=sys.stderr)
+            log_event('WARNING', 'main',
+                      f"Startup degraded: {len(_startup_errors)} error(s): {'; '.join(_startup_errors)}")
+            logger.warning(f"Startup degraded with {len(_startup_errors)} error(s)")
+        else:
+            _startup_healthy = True
+            log_event('INFO', 'main', 'Bot started successfully')
+            logger.info("Bot started successfully")
+        
+    except Exception as e:
+        # Safety net: if anything in the outer try/except itself crashes
+        _startup_healthy = False
+        _startup_errors.append(f"Unexpected startup crash: {e}")
+        print(f"[CRITICAL] Startup crashed: {e}", file=sys.stderr)
+        log_event('ERROR', 'main', f"Startup crashed: {e}")
     
     yield
     
-    # Shutdown
-    uptime = (datetime.now(timezone.utc) - app.state.bot_started_at).total_seconds()
-    logger.info(f"Shutting down after {uptime:.0f}s uptime")
-    notifier = getattr(app.state, 'notifier', None)
-    if notifier and notifier.is_configured:
-        notifier.send_shutdown(uptime)
-    log_event('INFO', 'main', 'Bot shutting down')
-    logger.info("Bot shutdown complete.")
+    # Shutdown (also wrapped in try/except — never crash on shutdown)
+    try:
+        uptime = (datetime.now(timezone.utc) - _bot_started_at).total_seconds()
+        logger.info(f"Shutting down after {uptime:.0f}s uptime")
+        notifier = getattr(app.state, 'notifier', None)
+        if notifier and notifier.is_configured:
+            notifier.send_shutdown(uptime)
+        log_event('INFO', 'main', 'Bot shutting down')
+        logger.info("Bot shutdown complete.")
+    except Exception as e:
+        print(f"[WARNING] Shutdown error: {e}", file=sys.stderr)
 
 
 # ─── FastAPI App ───────────────────────────────────────────
@@ -278,119 +333,145 @@ def _start_scheduler():
 
 
 def check_btc_candle():
-    """Check BTC candle for triggers. Runs every hour at xx:30:02 IST."""
-    from backend.api.binance import is_ip_banned, get_ban_info
+    """Check BTC candle for triggers. Runs every hour at xx:30:02 IST.
     
-    # ── Skip if Binance IP is banned ──
-    if is_ip_banned():
-        ban_info = get_ban_info()
-        log_event('WARNING', 'main',
-                  f'BTC check skipped: Binance IP banned for {ban_info["remaining"]}s more')
-        return
-    
+    SAFETY: Entire function wrapped in try/except. If ANY step fails,
+    the error is logged and the scheduler continues running — the job
+    never crashes the scheduler or the main app.
+    """
     try:
-        # Always check daily reset at start of each cycle
-        from backend.state.state_manager import RiskState
-        RiskState.check_and_reset_daily()
+        from backend.api.binance import is_ip_banned, get_ban_info
         
-        signal = signal_generator.check_trigger()
-        if signal:
-            log_event('INFO', 'main',
-                      f"Signal generated: {signal.side} BTC={signal.btc_return_pct:+.2f}%")
-            # Execute signal through trading engine
-            entry_result = entry_manager.execute_signal(signal)
-            entries = len(entry_result.get('entries', []))
-            failed = len(entry_result.get('failed', []))
-            log_event('INFO', 'main',
-                      f"Signal execution: {entries} entered, {failed} failed")
+        # ── Skip if Binance IP is banned ──
+        if is_ip_banned():
+            ban_info = get_ban_info()
+            log_event('WARNING', 'main',
+                      f'BTC check skipped: Binance IP banned for {ban_info["remaining"]}s more')
+            return
+        
+        try:
+            # Always check daily reset at start of each cycle
+            from backend.state.state_manager import RiskState
+            RiskState.check_and_reset_daily()
             
-            # Send email alert
+            signal = signal_generator.check_trigger()
+            if signal:
+                log_event('INFO', 'main',
+                          f"Signal generated: {signal.side} BTC={signal.btc_return_pct:+.2f}%")
+                # Execute signal through trading engine
+                entry_result = entry_manager.execute_signal(signal)
+                entries = len(entry_result.get('entries', []))
+                failed = len(entry_result.get('failed', []))
+                log_event('INFO', 'main',
+                          f"Signal execution: {entries} entered, {failed} failed")
+                
+                # Send email alert
+                notifier = get_notifier()
+                if notifier.is_configured and entries > 0:
+                    notifier.send_trade_entry(
+                        signal_side=signal.side,
+                        btc_return_pct=signal.btc_return_pct,
+                        entries=entry_result.get('entries', []),
+                        failed=entry_result.get('failed', []),
+                    )
+        except Exception as e:
+            log_event('ERROR', 'main', f"BTC check failed: {e}")
+            # Send error alert
             notifier = get_notifier()
-            if notifier.is_configured and entries > 0:
-                notifier.send_trade_entry(
-                    signal_side=signal.side,
-                    btc_return_pct=signal.btc_return_pct,
-                    entries=entry_result.get('entries', []),
-                    failed=entry_result.get('failed', []),
-                )
+            if notifier.is_configured:
+                notifier.send_error_alert('main', f"BTC check failed: {e}")
     except Exception as e:
-        log_event('ERROR', 'main', f"BTC check failed: {e}")
-        # Send error alert
-        notifier = get_notifier()
-        if notifier.is_configured:
-            notifier.send_error_alert('main', f"BTC check failed: {e}")
+        # Absolute last resort — never let any crash escape the job
+        log_event('ERROR', 'main', f"BTC check CRASHED (scheduler-safe): {e}")
 
 
 def monitor_positions():
-    """Monitor open positions. Runs every ~5 minutes."""
-    from backend.state.state_manager import PositionState, RiskState
-    from backend.api.binance import is_ip_banned, get_ban_info
+    """Monitor open positions. Runs every ~5 minutes.
     
-    # ── Skip if Binance IP is banned ──
-    if is_ip_banned():
-        ban_info = get_ban_info()
-        log_event('WARNING', 'main',
-                  f'Monitor skipped: Binance IP banned for {ban_info["remaining"]}s more')
-        return
-    
-    # Check daily reset
-    RiskState.check_and_reset_daily()
-    
-    # Run reconciliation first (catch any state drift)
-    recon_result = reconciliation.reconcile_all()
-    if recon_result.get('issues_found', 0) > 0:
-        log_event('INFO', 'main',
-                  f"Reconciliation: {recon_result['issues_found']} issues, "
-                  f"{recon_result['issues_fixed']} fixed")
-    
-    if not PositionState.is_in_trade():
-        return  # No open positions
-    
-    # Check TP/SL and handle exits for all open positions
-    exit_events = exit_manager.check_all_positions()
-    if exit_events:
-        for ev in exit_events:
+    SAFETY: Entire function wrapped in try/except. If ANY step fails,
+    the error is logged and the scheduler continues running.
+    """
+    try:
+        from backend.state.state_manager import PositionState, RiskState
+        from backend.api.binance import is_ip_banned, get_ban_info
+        
+        # ── Skip if Binance IP is banned ──
+        if is_ip_banned():
+            ban_info = get_ban_info()
+            log_event('WARNING', 'main',
+                      f'Monitor skipped: Binance IP banned for {ban_info["remaining"]}s more')
+            return
+        
+        # Check daily reset
+        RiskState.check_and_reset_daily()
+        
+        # Run reconciliation first (catch any state drift)
+        recon_result = reconciliation.reconcile_all()
+        if recon_result.get('issues_found', 0) > 0:
             log_event('INFO', 'main',
-                      f"Exit event: {ev['symbol']} - {ev['type']} "
-                      f"PnL=${ev.get('pnl_usdt', 0):+.2f}")
-            # Send email alert for exit events
-            notifier = get_notifier()
-            if notifier.is_configured:
-                notifier.send_trade_exit(
-                    exit_type=ev['type'],
-                    symbol=ev['symbol'],
-                    side=ev.get('side', 'LONG'),
-                    entry_price=ev.get('entry_price', 0),
-                    exit_price=ev.get('exit_price', 0),
-                    pnl_usdt=ev.get('pnl_usdt', 0),
-                    pnl_pct=ev.get('pnl_pct', 0),
-                    exit_time=ev.get('exit_time', ''),
-                )
+                      f"Reconciliation: {recon_result['issues_found']} issues, "
+                      f"{recon_result['issues_fixed']} fixed")
+        
+        if not PositionState.is_in_trade():
+            return  # No open positions
+        
+        # Check TP/SL and handle exits for all open positions
+        exit_events = exit_manager.check_all_positions()
+        if exit_events:
+            for ev in exit_events:
+                log_event('INFO', 'main',
+                          f"Exit event: {ev['symbol']} - {ev['type']} "
+                          f"PnL=${ev.get('pnl_usdt', 0):+.2f}")
+                # Send email alert for exit events
+                notifier = get_notifier()
+                if notifier.is_configured:
+                    notifier.send_trade_exit(
+                        exit_type=ev['type'],
+                        symbol=ev['symbol'],
+                        side=ev.get('side', 'LONG'),
+                        entry_price=ev.get('entry_price', 0),
+                        exit_price=ev.get('exit_price', 0),
+                        pnl_usdt=ev.get('pnl_usdt', 0),
+                        pnl_pct=ev.get('pnl_pct', 0),
+                        exit_time=ev.get('exit_time', ''),
+                    )
+    except Exception as e:
+        log_event('ERROR', 'main', f"Monitor positions CRASHED (scheduler-safe): {e}")
 
 
 def daily_reset():
     """Reset daily counters. Runs at 00:01 IST every day."""
-    from backend.state.state_manager import RiskState
-    RiskState.check_and_reset_daily()
-    log_event('INFO', 'main', 'Daily reset completed')
+    try:
+        from backend.state.state_manager import RiskState
+        RiskState.check_and_reset_daily()
+        log_event('INFO', 'main', 'Daily reset completed')
+    except Exception as e:
+        log_event('ERROR', 'main', f"Daily reset CRASHED (scheduler-safe): {e}")
 
 
 def run_weekly_scan_job():
     """Run the weekly correlation scan."""
-    log_event('INFO', 'main', 'Starting weekly correlation scan...')
-    result = data_fetcher.run_weekly_scan()
-    log_event('INFO', 'main',
-              f"Weekly scan: {result.get('scanned', 0)} scanned, "
-              f"{result.get('top_coins', [])}")
-    return result
+    try:
+        log_event('INFO', 'main', 'Starting weekly correlation scan...')
+        result = data_fetcher.run_weekly_scan()
+        log_event('INFO', 'main',
+                  f"Weekly scan: {result.get('scanned', 0)} scanned, "
+                  f"{result.get('top_coins', [])}")
+        return result
+    except Exception as e:
+        log_event('ERROR', 'main', f"Weekly scan CRASHED (scheduler-safe): {e}")
+        return {'success': False, 'error': str(e)}
 
 
 def run_weekly_scan_if_needed():
     """Run scan on startup if needed (e.g., first deploy)."""
-    from backend.state.state_manager import WeeklyScanState
-    if WeeklyScanState.needs_scan():
-        log_event('INFO', 'main', 'No scan for this week, running initial scan...')
-        run_weekly_scan_job()
+    try:
+        from backend.state.state_manager import WeeklyScanState
+        if WeeklyScanState.needs_scan():
+            log_event('INFO', 'main', 'No scan for this week, running initial scan...')
+            run_weekly_scan_job()
+    except Exception as e:
+        log_event('ERROR', 'main', f"Initial scan check CRASHED (scheduler-safe): {e}")
 
 
 def _check_orphan_positions():
@@ -439,10 +520,12 @@ def send_status_summary_email():
 def take_pnl_snapshot():
     """Take a PnL snapshot for the equity curve chart.
     Runs every hour and at startup.
+    
+    SAFETY: Already had try/except, but now also catches critical failures.
     """
     try:
         from backend.state.state_manager import get_bot_status
-        from backend.database.db import get_trade_stats
+        from backend.database.db import get_trade_stats, save_pnl_snapshot
         stats = get_trade_stats()
         status = get_bot_status()
         save_pnl_snapshot(
@@ -460,13 +543,27 @@ def take_pnl_snapshot():
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint (used by UptimeRobot to keep Render alive)."""
+    """Health check endpoint (used by UptimeRobot to keep Render alive).
+    
+    CRITICAL: This endpoint MUST NEVER return 500. If anything fails
+    (DB locked, state unavailable), it returns a degraded status instead
+    of crashing. Docker HEALTHCHECK and UptimeRobot rely on this.
+    """
+    try:
+        in_trade = len(get_open_trades()) > 0
+    except Exception:
+        in_trade = False
+    
+    status = "degraded" if not _startup_healthy else "ok"
+    
     return {
-        "status": "ok",
+        "status": status,
+        "healthy": _startup_healthy,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "uptime_seconds": int((datetime.now(timezone.utc) - _bot_started_at).total_seconds()),
-        "in_trade": len(get_open_trades()) > 0,
+        "in_trade": in_trade,
         "version": "1.0.0",
+        "startup_errors": _startup_errors if _startup_errors else None,
     }
 
 
