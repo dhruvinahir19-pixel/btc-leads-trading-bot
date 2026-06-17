@@ -10,6 +10,9 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
+import threading
+import urllib.request
+import urllib.error
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -156,6 +159,12 @@ async def lifespan(app: FastAPI):
         _startup_errors.append(f"Unexpected startup crash: {e}")
         print(f"[CRITICAL] Startup crashed: {e}", file=sys.stderr)
         log_event('ERROR', 'main', f"Startup crashed: {e}")
+    
+    # ── Start keep-alive thread ALWAYS, even in degraded mode ──
+    # The app must keep itself alive even when degraded so it can
+    # serve /health and allow diagnosis. Without this, degraded mode
+    # falls into a permanent sleep-loop (spin down → wake → spin down).
+    _start_keepalive_thread()
     
     yield
     
@@ -541,10 +550,11 @@ def take_pnl_snapshot():
 
 # ─── API Endpoints ─────────────────────────────────────────
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
     """Health check endpoint (used by UptimeRobot to keep Render alive).
     
+    Supports both GET and HEAD methods (UptimeRobot uses HEAD).
     CRITICAL: This endpoint MUST NEVER return 500. If anything fails
     (DB locked, state unavailable), it returns a degraded status instead
     of crashing. Docker HEALTHCHECK and UptimeRobot rely on this.
@@ -555,6 +565,9 @@ def health_check():
         in_trade = False
     
     status = "degraded" if not _startup_healthy else "ok"
+    
+    # Log health check pings for visibility in Render logs
+    logger.debug(f"Health check: {status} | uptime={int((datetime.now(timezone.utc) - _bot_started_at).total_seconds())}s")
     
     return {
         "status": status,
@@ -736,6 +749,47 @@ def api_trade_journal(
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+# ─── Keep-Alive Thread ───────────────────────────────────────
+
+def _start_keepalive_thread():
+    """Start a daemon thread that pings our own public URL every 10 minutes.
+    
+    This serves as a SECONDARY keep-alive mechanism alongside external
+    monitors like UptimeRobot. As long as the app is running, this
+    self-ping prevents Render's 15-minute spin-down even if the external
+    monitor misses a few checks.
+    
+    The thread is a daemon thread — it won't block shutdown.
+    Uses urllib (standard library) — no extra dependencies.
+    """
+    if not IS_RENDER or not RENDER_EXTERNAL_URL:
+        logger.info("Keep-alive: disabled (requires RENDER_EXTERNAL_URL)")
+        return
+    
+    health_url = f"{RENDER_EXTERNAL_URL}/health"
+    logger.info(f"Keep-alive: pinging {health_url} every 600s")
+    
+    def _ping_loop():
+        while True:
+            try:
+                time.sleep(600)  # 10 minutes (under Render's 15-min threshold)
+                req = urllib.request.Request(health_url, method="GET")
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    status = resp.status
+                if status == 200:
+                    logger.debug(f"Keep-alive ping: {health_url} \u2192 {status}")
+                else:
+                    logger.warning(f"Keep-alive ping: {health_url} \u2192 {status}")
+            except urllib.error.URLError as e:
+                logger.debug(f"Keep-alive ping failed (transient): {e.reason}")
+            except Exception as e:
+                logger.debug(f"Keep-alive ping failed: {e}")
+    
+    thread = threading.Thread(target=_ping_loop, daemon=True, name="keepalive-ping")
+    thread.start()
+    logger.info("Keep-alive thread running")
+
+
 # ─── Helper ────────────────────────────────────────────────
 
 def get_btc_price() -> float:
@@ -778,9 +832,15 @@ else:
     logger.warning(f"Frontend NOT BUILT — run 'cd frontend && npm run build' to build it")
 
 
-@app.get("/", include_in_schema=False)
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 def serve_index():
-    """Serve the frontend SPA, or return a health-like JSON for uptime monitors."""
+    """Serve the frontend SPA, or return a health-like JSON for uptime monitors.
+    
+    Supports both GET and HEAD methods (UptimeRobot uses HEAD).
+    Always returns 200 so uptime monitors never see 405.
+    """
+    # Log root pings at DEBUG level for visibility
+    logger.debug("Root route ping")
     if _frontend_available:
         return FileResponse(str(STATIC_DIR / "index.html"))
     # Always return 200 so UptimeRobot / Render keepalive never sees 405
