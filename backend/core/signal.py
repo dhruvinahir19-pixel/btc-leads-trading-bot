@@ -118,7 +118,8 @@ class SignalGenerator:
         candle_ist = to_ist_timestamp(candle_open_utc_ts)
 
         # Check if already processed (prevents duplicate triggers)
-        if ws.is_connected() and PositionState.is_btc_candle_processed(candle_ist):
+        # Always check — WebSocket or REST, we never re-process candles.
+        if PositionState.is_btc_candle_processed(candle_ist):
             return None
 
         # Get previous candle for return calculation

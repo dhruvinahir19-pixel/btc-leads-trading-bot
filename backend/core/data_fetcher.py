@@ -4,7 +4,6 @@ Handles candle fetching, weekly coin scanning, and data caching.
 """
 import time
 import json
-import random
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 

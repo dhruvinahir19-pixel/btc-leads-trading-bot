@@ -182,6 +182,9 @@ async def lifespan(app: FastAPI):
     
     # Shutdown (also wrapped in try/except — never crash on shutdown)
     try:
+        # Gracefully close WebSocket connection
+        ws.stop()
+        
         uptime = (datetime.now(timezone.utc) - _bot_started_at).total_seconds()
         logger.info(f"Shutting down after {uptime:.0f}s uptime")
         notifier = getattr(app.state, 'notifier', None)
@@ -815,12 +818,13 @@ def get_btc_price() -> float:
     global _btc_price_cache
     
     # ── Try WebSocket first (no API weight, real-time) ──
-    ws_price = ws.get_btc_price()
-    if ws_price > 0:
-        # Update cache so banned fallback has fresh data
-        _btc_price_cache['price'] = ws_price
-        _btc_price_cache['timestamp'] = time.time()
-        return ws_price
+    if ws.is_connected():
+        ws_price = ws.get_btc_price()
+        if ws_price > 0:
+            # Update cache so banned fallback has fresh data
+            _btc_price_cache['price'] = ws_price
+            _btc_price_cache['timestamp'] = time.time()
+            return ws_price
     
     # ── Fallback to REST + cache ──
     from backend.api.binance import is_ip_banned

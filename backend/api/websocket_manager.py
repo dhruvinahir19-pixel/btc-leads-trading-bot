@@ -17,7 +17,6 @@ Auto-reconnects on disconnect with 5s delay.
 import json
 import threading
 import time
-import urllib.parse
 from typing import Optional
 
 import websocket
@@ -141,9 +140,10 @@ def _run_loop():
     global _ws
     while not _should_stop:
         try:
-            # URL-encode the stream names for the combined stream URL
-            encoded = urllib.parse.quote(STREAMS, safe='')
-            url = f"{WSS_BASE}?streams={encoded}"
+            # Combined stream URL: / between streams is the DELIMITER, NOT a path
+            # Do NOT URL-encode the slashes — Binance expects raw / between streams.
+            # Characters @ and ! are accepted as-is by Binance's server.
+            url = f"{WSS_BASE}?streams={STREAMS}"
 
             _ws = websocket.WebSocketApp(
                 url,
