@@ -6,10 +6,12 @@ All methods include retry logic, rate limit awareness, and error handling.
 import hashlib
 import hmac
 import json
+import random
 import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone, timedelta
+from functools import wraps
 from typing import Optional
 
 from backend.config import (
@@ -21,8 +23,19 @@ from backend.config import (
 # ─── Constants ──────────────────────────────────────────────
 RECV_WINDOW = 5000  # 5 seconds
 MAX_RETRIES = 3
-RETRY_DELAY = 2  # seconds
+RETRY_DELAY = 2  # seconds (base delay for linear retry, kept for backward compat)
 REQUEST_TIMEOUT = 15
+
+# ─── Exponential Backoff + Throttle ───────────────────────────
+# The bot hits Binance API many times per cycle. To avoid 429/418
+# bans from shared Render IPs, we use:
+# 1. Exponential backoff with jitter on retries
+# 2. A minimum throttle between ANY two Binance requests
+# 3. Retry-After header respect (Binance tells us how long to wait)
+BASE_RETRY_DELAY = 5        # Base delay in seconds; 2^attempt * base = 5s, 10s, 20s
+MAX_RETRY_WAIT = 120        # Cap every wait at 2 minutes max
+MIN_REQUEST_INTERVAL = 0.8  # Minimum seconds between ANY two Binance API calls
+_last_request_time: float = 0.0  # Timestamp of last outbound request
 
 # ─── Global IP ban state ───────────────────────────────────
 # When Binance bans our IP (HTTP 418), ALL requests will fail until the ban lifts.
@@ -32,9 +45,136 @@ REQUEST_TIMEOUT = 15
 _ip_banned_until: float = 0.0  # Unix timestamp; 0 = not banned
 
 
+def _enforce_throttle():
+    """Enforce minimum interval between Binance API requests.
+
+    Prevents the bot from sending requests too rapidly, which is
+    the #1 cause of 429 rate limits. Every outbound call to Binance
+    must go through this check.
+
+    The minimum interval (MIN_REQUEST_INTERVAL = 0.8s) ensures at
+    most ~75 requests per minute, well under Binance's 1200 weight/min limit.
+    """
+    global _last_request_time
+    elapsed = time.time() - _last_request_time
+    if elapsed < MIN_REQUEST_INTERVAL:
+        sleep_time = MIN_REQUEST_INTERVAL - elapsed
+        time.sleep(sleep_time)
+    _last_request_time = time.time()
+
+
+def _exponential_backoff(attempt: int) -> float:
+    """Calculate exponential backoff with jitter.
+
+    Formula: min(BASE_RETRY_DELAY * 2^attempt + random_jitter, MAX_RETRY_WAIT)
+
+    Attempt 0: 5s + jitter (0-2s)  -> 5-7s
+    Attempt 1: 10s + jitter (0-4s) -> 10-14s
+    Attempt 2: 20s + jitter (0-6s) -> 20-26s
+    Attempt 3+: capped at MAX_RETRY_WAIT (120s)
+
+    The jitter prevents thundering herd problems where multiple
+    workers retry simultaneously.
+    """
+    delay = BASE_RETRY_DELAY * (2 ** attempt)
+    jitter = random.uniform(0, delay * 0.3)  # Up to 30% jitter
+    return min(delay + jitter, MAX_RETRY_WAIT)
+
+
+# ─── binance_retry Decorator ─────────────────────────────────
+# A reusable decorator that wraps any Binance API call with
+# exponential backoff + jitter, 418/429 handling, and throttle.
+# Can be used on standalone functions or class methods.
+
+def binance_retry(func):
+    """Decorator: wraps a Binance API call with exponential backoff + jitter.
+
+    Handles:
+    - 418 (IP Banned): immediately sets global ban state, raises (no retries)
+    - 429 (Rate Limited): respects Retry-After header; falls back to
+      exponential backoff with jitter if no header
+    - 5xx (Server Error): exponential backoff with jitter
+    - Network errors (URLError, Timeout): exponential backoff with jitter
+
+    Usage:
+        @binance_retry
+        def my_binance_call():
+            ...
+
+    Or as a wrapper:
+        binance_retry(my_binance_call)(args)
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        last_error = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                # Enforce minimum interval between API calls
+                _enforce_throttle()
+                return func(*args, **kwargs)
+            except urllib.error.HTTPError as e:
+                body = e.read().decode('utf-8', errors='replace')
+                last_error = BinanceError(e.code, body)
+
+                if e.code == 418:
+                    # ── IP BANNED — do NOT retry ──
+                    retry_after = e.headers.get('Retry-After')
+                    if retry_after:
+                        try:
+                            _set_banned(int(retry_after))
+                        except (ValueError, TypeError):
+                            pass
+                    raise last_error
+
+                elif e.code == 429:
+                    # ── Rate limited — prefer Retry-After, fallback to backoff ──
+                    if attempt < MAX_RETRIES - 1:
+                        retry_after = e.headers.get('Retry-After')
+                        if retry_after:
+                            try:
+                                wait = int(retry_after)
+                            except (ValueError, TypeError):
+                                wait = _exponential_backoff(attempt)
+                            else:
+                                _log_warning('binance',
+                                             f'Rate limited. Waiting {wait}s (Retry-After header)')
+                            time.sleep(wait)
+                        else:
+                            wait = _exponential_backoff(attempt)
+                            _log_warning('binance',
+                                         f'Rate limited (no Retry-After). Backoff {wait:.1f}s')
+                            time.sleep(wait)
+                        continue
+
+                elif e.code in (408, 500, 502, 503, 504):
+                    # ── Server errors — exponential backoff ──
+                    if attempt < MAX_RETRIES - 1:
+                        wait = _exponential_backoff(attempt)
+                        time.sleep(wait)
+                        continue
+
+                # Other errors (400, 401, 403) -> don't retry
+                break
+
+            except BinanceError:
+                # Re-raise our own exceptions (already handled above)
+                raise
+
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                last_error = BinanceError(0, str(e))
+                if attempt < MAX_RETRIES - 1:
+                    wait = _exponential_backoff(attempt)
+                    time.sleep(wait)
+                    continue
+                break
+
+        raise last_error or BinanceError(0, 'Max retries exceeded')
+    return wrapper
+
+
 def _load_ban_from_db():
     """Load ban state from the database (shared across workers, survives restarts).
-    
+
     Called at module init and periodically to sync with DB.
     If the DB has a longer ban than in-memory, use the DB value.
     If the in-memory state says banned but DB says not, trust DB (other
@@ -63,7 +203,7 @@ def _load_ban_from_db():
 
 def _save_ban_to_db():
     """Persist current ban state to database.
-    
+
     This ensures the ban state survives bot restarts and is shared
     across all gunicorn workers (each worker has its own in-memory state).
     """
@@ -80,16 +220,16 @@ def _save_ban_to_db():
 
 def _check_banned():
     """Check if IP is currently banned. If so, raise BinanceError immediately.
-    
+
     Checks BOTH in-memory state (fast path) and DB state (shared across workers).
     This short-circuits ALL Binance API calls when the IP is banned,
     preventing the bot from freezing on every single request.
-    
+
     Also syncs ban expiry from DB periodically — if another worker
     has a longer ban, this process will respect it.
     """
     global _ip_banned_until
-    
+
     # ── Sync from DB every time we check (catches bans set by other workers) ──
     try:
         from backend.database.db import config_get
@@ -107,7 +247,7 @@ def _check_banned():
                 config_set('binance_banned_until', '')
     except Exception:
         pass
-    
+
     if _ip_banned_until > time.time():
         remaining = int(_ip_banned_until - time.time())
         body = ('{"code":-1003,"msg":"IP banned until ' +
@@ -119,11 +259,11 @@ def _check_banned():
 
 def _set_banned(retry_after_seconds: int):
     """Set the global IP ban state.
-    
+
     Once set, ALL subsequent Binance API calls will be short-circuited
     until the ban duration expires. This prevents the bot from making
     hundreds of failing requests (each waiting ~1.5h for retries).
-    
+
     The ban state is also persisted to the database so it survives
     restarts and is shared across all workers.
     """
@@ -155,15 +295,15 @@ class BinanceError(Exception):
 class BinanceClient:
     """
     Binance Futures API client.
-    
+
     Args:
         use_demo: If True, uses demo API keys for order placement.
                   If False, uses real API keys for data fetching.
     """
-    
+
     def __init__(self, use_demo: bool = False):
         self.use_demo = use_demo
-        
+
         if use_demo:
             self.base_url = BASE_URL_TESTNET  # Testnet for paper trading
             self.api_key = BINANCE_DEMO_KEY
@@ -172,14 +312,14 @@ class BinanceClient:
             self.base_url = BASE_URL  # Mainnet for real data
             self.api_key = BINANCE_API_KEY
             self.api_secret = BINANCE_API_SECRET
-    
+
     # ─── Request Helpers ─────────────────────────────────────
-    
+
     def _sign(self, params: dict) -> dict:
         """Add signature to params dict. Returns the signed params."""
         if not self.api_secret:
             raise BinanceError(0, "API secret not configured. Check .env file.")
-        
+
         query = urllib.parse.urlencode(params)
         signature = hmac.new(
             self.api_secret.encode('utf-8'),
@@ -188,145 +328,97 @@ class BinanceClient:
         ).hexdigest()
         params['signature'] = signature
         return params
-    
+
+    # ─── _request: single entry point with retry + backoff + throttle ───
+    # Uses binance_retry decorator for exponential backoff + jitter on 429/5xx.
+    # Also enforces MIN_REQUEST_INTERVAL throttle between calls.
+
+    @binance_retry
     def _request(self, method: str, path: str, params: Optional[dict] = None,
                  signed: bool = False) -> dict:
-        """Make an HTTP request to Binance API with retry logic.
-        
+        """Make an HTTP request to Binance API.
+
         Key behaviors:
         - Checks global IP ban state FIRST — short-circuits if banned
+        - Enforces minimum throttle between requests (MIN_REQUEST_INTERVAL)
+        - Decorated with @binance_retry for exponential backoff + jitter
         - On 418 (IP banned): sets global ban state, raises immediately (no retry)
-        - On 429 (rate limited): reads Retry-After header, waits, retries
-        - On 5xx: standard retry with backoff
+        - On 429 (rate limited): reads Retry-After header, falls back to backoff
+        - On 5xx: exponential backoff with jitter
+
+        NOTE: The retry logic is handled by @binance_retry. This method
+        focuses on building the request and parsing the response.
         """
         # ── Check global IP ban state before making any request ──
         _check_banned()
-        
+
         url = f"{self.base_url}{path}"
         headers = {
             'User-Agent': 'Mozilla/5.0',
             'Content-Type': 'application/x-www-form-urlencoded',
         }
-        
+
         if self.api_key:
             headers['X-MBX-APIKEY'] = self.api_key
-        
+
         if params is None:
             params = {}
-        
+
         if signed:
             params['timestamp'] = int(time.time() * 1000)
             params['recvWindow'] = RECV_WINDOW
             params = self._sign(params)
-        
+
         query = urllib.parse.urlencode(params)
         if query:
             url = f"{url}?{query}"
-        
-        last_error = None
-        for attempt in range(MAX_RETRIES):
-            try:
-                req = urllib.request.Request(url, headers=headers, method=method)
-                resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
-                raw = resp.read().decode('utf-8', errors='replace')
-                
-                # Check for Binance error codes in response
-                data = json.loads(raw)
-                if isinstance(data, dict) and 'code' in data and data['code'] < 0:
-                    raise BinanceError(data['code'], data.get('msg', 'Unknown error'))
-                
-                return data
-            
-            except urllib.error.HTTPError as e:
-                body = e.read().decode('utf-8', errors='replace')
-                last_error = BinanceError(e.code, body)
-                
-                if e.code == 418:
-                    # ── IP BANNED — do NOT retry ──
-                    # IP bans last minutes/hours. Retrying would freeze the
-                    # bot for hours. Set global ban state and raise immediately.
-                    retry_after = e.headers.get('Retry-After')
-                    if retry_after:
-                        try:
-                            _set_banned(int(retry_after))
-                        except (ValueError, TypeError):
-                            pass
-                    raise last_error
-                
-                elif e.code == 429:
-                    # ── Rate limited — read Retry-After, wait, retry ──
-                    if attempt < MAX_RETRIES - 1:
-                        retry_after = e.headers.get('Retry-After')
-                        if retry_after:
-                            try:
-                                wait = int(retry_after)
-                            except (ValueError, TypeError):
-                                wait = RETRY_DELAY * (attempt + 1)
-                            else:
-                                _log_warning('binance',
-                                             f"Rate limited. Waiting {wait}s (Retry-After header)")
-                            time.sleep(wait)
-                        else:
-                            time.sleep(RETRY_DELAY * (attempt + 1))
-                        continue
-                
-                elif e.code in (408, 500, 502, 503, 504):
-                    # ── Server errors — standard retry ──
-                    if attempt < MAX_RETRIES - 1:
-                        time.sleep(RETRY_DELAY * (attempt + 1))
-                        continue
-                
-                # Other errors (400, 401, 403) -> don't retry
-                break
-            
-            except BinanceError:
-                # Re-raise our own exceptions (already handled above)
-                raise
-            
-            except (urllib.error.URLError, TimeoutError, OSError) as e:
-                last_error = BinanceError(0, str(e))
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_DELAY * (attempt + 1))
-                    continue
-                break
-        
-        raise last_error or BinanceError(0, "Max retries exceeded")
-    
+
+        req = urllib.request.Request(url, headers=headers, method=method)
+        resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
+        raw = resp.read().decode('utf-8', errors='replace')
+
+        # Check for Binance error codes in response
+        data = json.loads(raw)
+        if isinstance(data, dict) and 'code' in data and data['code'] < 0:
+            raise BinanceError(data['code'], data.get('msg', 'Unknown error'))
+
+        return data
+
     def _get(self, path: str, params: Optional[dict] = None,
              signed: bool = False) -> dict:
         """GET request."""
         return self._request('GET', path, params, signed)
-    
+
     def _post(self, path: str, params: Optional[dict] = None,
               signed: bool = False) -> dict:
         """POST request."""
         return self._request('POST', path, params, signed)
-    
+
     def _delete(self, path: str, params: Optional[dict] = None,
                 signed: bool = False) -> dict:
         """DELETE request."""
         return self._request('DELETE', path, params, signed)
-    
+
     # ─── Market Data Endpoints ──────────────────────────────
-    
+
     def get_exchange_info(self) -> dict:
         """Get exchange info - all trading pairs and their details."""
         return self._get('/fapi/v1/exchangeInfo')
-    
+
     def get_klines(self, symbol: str, interval: str = '1h',
                    start_time: Optional[int] = None,
                    end_time: Optional[int] = None,
                    limit: int = 500) -> list:
         """
         Get kline/candlestick data.
-        
+
         Args:
             symbol: e.g., 'BTCUSDT'
             interval: '1h', '4h', '1d', etc.
             start_time: milliseconds timestamp
             end_time: milliseconds timestamp
             limit: max 1500
-        
+
         Returns:
             List of candle dicts with keys: ts, o, h, l, c, v
         """
@@ -335,9 +427,9 @@ class BinanceClient:
             params['startTime'] = start_time
         if end_time:
             params['endTime'] = end_time
-        
+
         data = self._get('/fapi/v1/klines', params)
-        
+
         # Convert to dict list
         candles = []
         for c in data:
@@ -350,28 +442,28 @@ class BinanceClient:
                 'v': float(c[5]),
             })
         return candles
-    
+
     def get_all_klines_range(self, symbol: str, interval: str,
                               start_time: int, end_time: int) -> list:
         """
         Get all klines in a time range, handling pagination.
-        
+
         Uses limit=500 instead of max 1500 to keep per-call API weight
         at 2 (vs 10 for limit>1000). This prevents IP bans from
         rate limiting during the weekly 527-coin scan.
-        
+
         Args:
             symbol: e.g., 'BTCUSDT'
             interval: '1h', '4h', etc.
             start_time: milliseconds timestamp
             end_time: milliseconds timestamp
-        
+
         Returns:
             List of all candles in the range
         """
         all_candles = []
         current = start_time
-        
+
         while current < end_time:
             candles = self.get_klines(symbol, interval, start_time=current,
                                       end_time=end_time, limit=500)
@@ -382,33 +474,50 @@ class BinanceClient:
             # Rate limit courtesy delay between paginated calls
             if current < end_time:
                 time.sleep(0.2)
-        
+
         return all_candles
-    
+
     def get_ticker_price(self, symbol: str) -> float:
         """Get current price for a symbol."""
         data = self._get('/fapi/v1/ticker/price', {'symbol': symbol.upper()})
         return float(data['price'])
-    
+
+    def get_all_ticker_prices(self) -> dict:
+        """Get prices for ALL trading pairs in a single API call.
+
+        Uses Binance's bulk ticker/price endpoint (no symbol param = all symbols).
+        API weight: 5 for all symbols (vs 2 per individual symbol).
+
+        This is much more efficient than calling get_ticker_price() in a loop.
+        If you need prices for 10+ symbols, always use this method instead.
+
+        Returns:
+            Dict of {symbol: price}, e.g. {"BTCUSDT": 73260.0, "ETHUSDT": 3450.5}
+        """
+        data = self._get('/fapi/v1/ticker/price')  # No symbol = all prices
+        if isinstance(data, list):
+            return {item['symbol']: float(item['price']) for item in data}
+        return {}
+
     def get_ticker_24hr(self, symbol: str) -> dict:
         """Get 24hr ticker stats."""
         return self._get('/fapi/v1/ticker/24hr', {'symbol': symbol.upper()})
-    
+
     def get_order_book(self, symbol: str, limit: int = 20) -> dict:
         """Get order book for a symbol."""
         return self._get('/fapi/v1/depth', {'symbol': symbol.upper(), 'limit': limit})
-    
+
     # ─── Account Endpoints (Signed) ─────────────────────────
-    
+
     def get_account_info(self) -> dict:
         """Get account information including balances."""
         return self._get('/fapi/v2/account', signed=True)
-    
+
     def get_balance(self) -> list:
         """Get wallet balances."""
         data = self._get('/fapi/v2/account', signed=True)
         return data.get('assets', [])
-    
+
     def get_usdt_balance(self) -> float:
         """Get available USDT balance."""
         balances = self.get_balance()
@@ -416,14 +525,14 @@ class BinanceClient:
             if asset['asset'] == 'USDT':
                 return float(asset['availableBalance'])
         return 0.0
-    
+
     def get_positions(self) -> list:
         """Get current open positions."""
         data = self._get('/fapi/v2/account', signed=True)
         positions = data.get('positions', [])
         # Filter to only positions with non-zero amount
         return [p for p in positions if abs(float(p.get('positionAmt', 0))) > 0]
-    
+
     def get_position_for_symbol(self, symbol: str) -> Optional[dict]:
         """Get position for a specific symbol, or None if no position."""
         positions = self.get_positions()
@@ -431,18 +540,18 @@ class BinanceClient:
             if p['symbol'] == symbol.upper():
                 return p
         return None
-    
+
     # ─── Order Endpoints (Signed, Demo API) ─────────────────
-    
+
     def place_market_order(self, symbol: str, side: str, quantity: float) -> dict:
         """
         Place a market order.
-        
+
         Args:
             symbol: e.g., 'FARTCOINUSDT'
             side: 'BUY' or 'SELL'
             quantity: in coin units (not USDT)
-        
+
         Returns:
             Order response dict
         """
@@ -459,13 +568,13 @@ class BinanceClient:
             'quantity': quantity,
         }
         return self._post('/fapi/v1/order', params, signed=True)
-    
+
     def place_limit_order(self, symbol: str, side: str, quantity: float,
                           price: float, reduce_only: bool = False,
                           time_in_force: str = 'GTC') -> dict:
         """
         Place a limit order.
-        
+
         Args:
             symbol: e.g., 'FARTCOINUSDT'
             side: 'BUY' or 'SELL'
@@ -473,7 +582,7 @@ class BinanceClient:
             price: limit price (will be rounded to valid tick size)
             reduce_only: if True, only reduces position
             time_in_force: 'GTC' (good till cancelled) or 'IOC' (immediate or cancel)
-        
+
         Returns:
             Order response dict
         """
@@ -493,18 +602,18 @@ class BinanceClient:
         }
         if reduce_only:
             params['reduceOnly'] = 'true'
-        
+
         return self._post('/fapi/v1/order', params, signed=True)
-    
+
     def place_algo_order(self, symbol: str, side: str, order_type: str,
                            quantity: float, price: float = None,
                            stop_price: float = None) -> dict:
         """
         Place an Algo order via the Binance Futures Algo Order API.
-        
+
         This is required for STOP_LOSS and TAKE_PROFIT order types
         (Binance Futures deprecated regular STOP_MARKET on /fapi/v1/order).
-        
+
         Args:
             symbol: e.g., 'FARTCOINUSDT'
             side: 'BUY' or 'SELL'
@@ -512,7 +621,7 @@ class BinanceClient:
             quantity: in coin units
             price: required for TAKE_PROFIT (limit price)
             stop_price: required for STOP_LOSS (trigger price)
-        
+
         Returns:
             Order response dict from Algo Order API
         """
@@ -535,7 +644,7 @@ class BinanceClient:
             except Exception:
                 pass
             params['stopPrice'] = stop_price
-        
+
         return self._post('/fapi/v1/algo/order', params, signed=True)
 
     def cancel_algo_order(self, symbol: str, algo_order_id: int) -> dict:
@@ -558,17 +667,17 @@ class BinanceClient:
                            tp_price: float, sl_price: float) -> dict:
         """
         Place TP and SL orders simultaneously.
-        
+
         Strategy:
         - TP uses regular LIMIT reduceOnly order (works on all environments)
         - SL tries Algo Order API (STOP_LOSS) first (required by mainnet,
           returns -4120 if regular STOP_MARKET endpoint is used)
         - Falls back to regular STOP_MARKET if Algo API unavailable
           (testnet may not support Algo endpoint, returns -5000)
-        
+
         For LONG: TP = SELL LIMIT at tp_price, SL = SELL at sl_price
         For SHORT: TP = BUY LIMIT at tp_price, SL = BUY at sl_price
-        
+
         Returns:
             Dict with 'tp_order', 'sl_order' responses, and 'error' or None
         """
@@ -650,7 +759,7 @@ class BinanceClient:
             'sl_order': sl_response,
             'sl_fallback': None,
         }
-    
+
     def cancel_order(self, symbol: str, order_id: int) -> dict:
         """Cancel an open order."""
         params = {
@@ -658,19 +767,19 @@ class BinanceClient:
             'orderId': order_id,
         }
         return self._delete('/fapi/v1/order', params, signed=True)
-    
+
     def cancel_all_orders(self, symbol: str) -> list:
         """Cancel all open orders for a symbol."""
         params = {'symbol': symbol.upper()}
         return self._delete('/fapi/v1/allOpenOrders', params, signed=True)
-    
+
     def get_open_orders(self, symbol: Optional[str] = None) -> list:
         """Get all open orders, optionally filtered by symbol."""
         params = {}
         if symbol:
             params['symbol'] = symbol.upper()
         return self._get('/fapi/v1/openOrders', params, signed=True)
-    
+
     def get_order_status(self, symbol: str, order_id: int) -> dict:
         """Check order status."""
         params = {
@@ -678,9 +787,9 @@ class BinanceClient:
             'orderId': order_id,
         }
         return self._get('/fapi/v1/order', params, signed=True)
-    
+
     # ─── Utility ────────────────────────────────────────────
-    
+
     def get_lot_size_info(self, symbol: str) -> dict:
         """Get lot size filters for a symbol (min/max qty, step size)."""
         info = self.get_exchange_info()
@@ -695,7 +804,7 @@ class BinanceClient:
                         }
                 return {}
         return {}
-    
+
     def round_quantity(self, symbol: str, quantity: float) -> float:
         """Round quantity to valid step size for the symbol."""
         lot_info = self.get_lot_size_info(symbol)
@@ -703,7 +812,7 @@ class BinanceClient:
             return quantity
         step = lot_info.get('stepSize', 0.001)
         return round(quantity - (quantity % step), 8)
-    
+
     def get_price_precision(self, symbol: str) -> int:
         """Get price precision (number of decimals) for a symbol."""
         info = self.get_exchange_info()
@@ -711,7 +820,7 @@ class BinanceClient:
             if s['symbol'] == symbol.upper():
                 return s.get('pricePrecision', 8)
         return 8
-    
+
     def get_quantity_precision(self, symbol: str) -> int:
         """Get quantity precision for a symbol."""
         info = self.get_exchange_info()
@@ -722,7 +831,7 @@ class BinanceClient:
 
     def get_price_filter(self, symbol: str) -> dict:
         """Get price filter (tickSize) for a symbol.
-        
+
         Returns dict with 'tickSize' or empty dict if not found.
         """
         info = self.get_exchange_info()
@@ -740,7 +849,7 @@ class BinanceClient:
 
     def round_price(self, symbol: str, price: float) -> float:
         """Round price to valid tick size for the symbol.
-        
+
         Binance requires limit/stop prices to be multiples of
         the symbol's tickSize (e.g., 0.000010 for DOGEUSDT).
         """
@@ -760,15 +869,15 @@ class BinanceClient:
 
 def is_ip_banned() -> bool:
     """Check if Binance IP ban is currently active.
-    
+
     Public function that can be called by the scheduler or main.py
     to skip Binance-dependent jobs (monitoring, BTC check, etc.).
     Synces from DB so it reflects bans set by other workers.
-    
+
     NOTE: This is a PURE boolean check — it does NOT raise BinanceError.
     Unlike _check_banned() which raises on ban (for use inside _request()),
     this function returns True/False so callers can handle bans gracefully.
-    
+
     Returns:
         True if the IP is currently banned (all Binance calls will fail)
     """
@@ -780,7 +889,7 @@ def is_ip_banned() -> bool:
 
 def get_ban_info() -> dict:
     """Get current ban state info (for diagnostics/logging).
-    
+
     Returns:
         Dict with 'banned' (bool), 'until' (unix ts or 0), 'remaining' (seconds or 0)
     """
@@ -824,7 +933,7 @@ def get_demo_client() -> BinanceClient:
 def test_connection() -> dict:
     """Test both API connections and return status."""
     results = {'data_api': False, 'demo_api': False, 'usdt_balance': 0, 'positions': 0}
-    
+
     try:
         dc = get_data_client()
         info = dc.get_exchange_info()
@@ -835,7 +944,7 @@ def test_connection() -> dict:
         results['btc_price'] = dc.get_ticker_price('BTCUSDT')
     except Exception as e:
         results['data_error'] = str(e)
-    
+
     try:
         dc = get_demo_client()
         balance = dc.get_usdt_balance()
@@ -845,5 +954,5 @@ def test_connection() -> dict:
         results['positions'] = len(positions)
     except Exception as e:
         results['demo_error'] = str(e)
-    
+
     return results
