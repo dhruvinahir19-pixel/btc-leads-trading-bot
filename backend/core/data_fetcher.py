@@ -119,12 +119,21 @@ class DataFetcher:
                 if symbol == 'BTCUSDT':
                     continue
                 
-                # Rate limit: wait 2-3s between coins to avoid IP ban
-                # 30 days of 1H data = 720 candles → 2 paginated calls per coin
-                # Each klines call = weight 2 (limit=500), so 4 weight per coin
-                # 527 coins × 2.5s avg = ~22 min total, well under 60 min limit
+                # ════════════════════════════════════════════════════════
+                # STRICT SEQUENTIAL THROTTLE
+                # ════════════════════════════════════════════════════════
+                # Each coin gets exactly 3s delay between requests. This is
+                # DELIBERATELY strict — no random jitter, no concurrency.
+                #
+                # Why strict? Binance's firewall tracks request patterns on
+                # shared Render IPs. Random delays are still detectable as
+                # a bot. A fixed 3s gap between every coin makes the traffic
+                # pattern appear as slow, organic human browsing.
+                #
+                # NO asyncio.gather, NO parallel threads. One coin at a time.
+                #============================================================
                 if scanned > 1:
-                    time.sleep(random.uniform(2.0, 3.0))
+                    time.sleep(3.0)  # Strict 3s between coins — never change!
                 
                 # Get scan data for this symbol
                 alt_data = self._get_scan_data(symbol)

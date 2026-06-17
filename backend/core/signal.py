@@ -11,6 +11,7 @@ from backend.config import (
     FIXED_COINS, to_ist_timestamp,
 )
 from backend.api.binance import get_data_client
+from backend.api import websocket_manager as ws
 from backend.database.db import mark_candle_processed, is_candle_processed, log_event
 from backend.state.state_manager import (
     PositionState, RiskState, WeeklyScanState
@@ -51,24 +52,29 @@ class SignalGenerator:
     
     def get_latest_btc_candle(self) -> Optional[dict]:
         """
-        Get the most recent COMPLETED BTC 1H candle using time-based calculation.
+        Get the most recent COMPLETED BTC 1H candle.
 
-        ⚠️ FIXED: Was using candles[-2] which returns WRONG candle when Binance
-        returns < 3 candles (possible at exact hour boundaries). Now calculates
-        the exact candle timestamp to fetch the right one every time.
+        PRIMARY: Uses WebSocket stream (btcusdt@kline_1h) — zero REST calls.
+        FALLBACK: If WebSocket has no candle yet (e.g., just started), falls
+        back to REST API call.
 
-        At each hour boundary (XX:00 UTC), the BTC 1H candle from
-        (XX-1):00 to XX:00 UTC has just completed. This method calculates
-        that exact candle's open timestamp and fetches it directly.
+        The WebSocket provides the candle when it closes (x: true). This is
+        the same data as the REST endpoint, but delivered in real-time without
+        any API weight cost.
 
         Returns:
             Candle dict with keys: ts, o, h, l, c, v
-            Or None if unable to fetch.
+            Or None if unable to fetch from either source.
         """
+        # ── Try WebSocket first (no API weight, real-time) ──
+        ws_candle = ws.get_btc_candle()
+        if ws_candle is not None:
+            return ws_candle
+
+        # ── Fallback to REST (cold start — WS not connected yet) ──
         try:
             now_utc = datetime.now(timezone.utc)
             current_hour_start = now_utc.replace(minute=0, second=0, microsecond=0)
-            # The most recently completed candle opened at (current_hour_start - 1 hour)
             target_open_ms = int((current_hour_start - timedelta(hours=1)).timestamp() * 1000)
 
             candle = self.client.get_klines(
@@ -77,7 +83,6 @@ class SignalGenerator:
                 limit=1
             )
             if not candle:
-                # Edge case: candle data not yet available (rare at exact boundary)
                 log_event('WARNING', 'signal',
                           f"No BTC candle found at target UTC open "
                           f"{current_hour_start - timedelta(hours=1)}. "
@@ -113,24 +118,30 @@ class SignalGenerator:
         candle_ist = to_ist_timestamp(candle_open_utc_ts)
 
         # Check if already processed (prevents duplicate triggers)
-        if PositionState.is_btc_candle_processed(candle_ist):
+        if ws.is_connected() and PositionState.is_btc_candle_processed(candle_ist):
             return None
 
         # Get previous candle for return calculation
-        prev_candle_open_ts = candle_open_utc_ts - 3600000  # 1 hour earlier
-        try:
-            prev_candle = self.client.get_klines(
-                'BTCUSDT', '1h',
-                start_time=prev_candle_open_ts,
-                limit=1
-            )
-            if not prev_candle:
-                log_event('WARNING', 'signal', f"No previous candle found for {candle_ist}")
+        # PRIMARY: Use WebSocket's prev_candle (no REST call)
+        # FALLBACK: REST API call
+        ws_prev = ws.get_prev_btc_candle()
+        if ws_prev is not None:
+            prev_close = ws_prev['c']
+        else:
+            prev_candle_open_ts = candle_open_utc_ts - 3600000  # 1 hour earlier
+            try:
+                prev_candle = self.client.get_klines(
+                    'BTCUSDT', '1h',
+                    start_time=prev_candle_open_ts,
+                    limit=1
+                )
+                if not prev_candle:
+                    log_event('WARNING', 'signal', f"No previous candle found for {candle_ist}")
+                    return None
+                prev_close = prev_candle[0]['c']
+            except Exception as e:
+                log_event('ERROR', 'signal', f"Failed to fetch previous BTC candle: {e}")
                 return None
-            prev_close = prev_candle[0]['c']
-        except Exception as e:
-            log_event('ERROR', 'signal', f"Failed to fetch previous BTC candle: {e}")
-            return None
 
         # Calculate BTC return (close-to-close of consecutive 1H candles)
         btc_return = (candle['c'] - prev_close) / prev_close * 100

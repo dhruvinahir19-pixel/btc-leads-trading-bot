@@ -46,6 +46,7 @@ from backend.trading.entry_manager import EntryManager
 from backend.trading.exit_manager import ExitManager
 from backend.trading.reconciliation import Reconciliation
 from backend.trading.risk_manager import RiskManager
+from backend.api import websocket_manager as ws
 
 # ─── Global state ──────────────────────────────────────────
 signal_generator = SignalGenerator()
@@ -160,6 +161,17 @@ async def lifespan(app: FastAPI):
         print(f"[CRITICAL] Startup crashed: {e}", file=sys.stderr)
         log_event('ERROR', 'main', f"Startup crashed: {e}")
     
+    # ── Start WebSocket manager for live market data ──
+    # Subscribes to Binance Futures WebSocket streams (klines, tickers)
+    # so the bot NEVER needs REST calls for live data. Falls back to
+    # REST if WS not connected (cold start).
+    try:
+        ws.start()
+        logger.info("WebSocket manager started for live market data")
+    except Exception as e:
+        _startup_errors.append(f"WebSocket start failed: {e}")
+        logger.warning(f"WebSocket manager failed to start: {e}")
+
     # ── Start keep-alive thread ALWAYS, even in degraded mode ──
     # The app must keep itself alive even when degraded so it can
     # serve /health and allow diagnosis. Without this, degraded mode
@@ -793,20 +805,28 @@ def _start_keepalive_thread():
 # ─── Helper ────────────────────────────────────────────────
 
 def get_btc_price() -> float:
-    """Get current BTC price with caching.
+    """Get current BTC price.
     
-    Returns cached price (up to 60s old) to avoid hammering Binance
-    on every dashboard load. When Binance IP is banned, returns the
-    last known cached price instead of making a call that would fail.
+    PRIMARY: Uses WebSocket stream (btcusdt@ticker) — zero REST calls,
+    live updates every ~250ms, no API weight consumed.
+    FALLBACK: If WebSocket not connected yet, uses REST with 60s cache.
+    When Binance IP is banned, returns last known price.
     """
     global _btc_price_cache
     
-    # Check if IP is banned — return cached price without attempting API call
+    # ── Try WebSocket first (no API weight, real-time) ──
+    ws_price = ws.get_btc_price()
+    if ws_price > 0:
+        # Update cache so banned fallback has fresh data
+        _btc_price_cache['price'] = ws_price
+        _btc_price_cache['timestamp'] = time.time()
+        return ws_price
+    
+    # ── Fallback to REST + cache ──
     from backend.api.binance import is_ip_banned
     if is_ip_banned():
         return _btc_price_cache.get('price', 0.0)
     
-    # Serve cached price if fresh (< 60s old)
     if time.time() - _btc_price_cache['timestamp'] < 60:
         return _btc_price_cache['price']
     
