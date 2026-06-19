@@ -87,6 +87,19 @@ def get_connection():
             _is_postgres = True
             _ensure_pg_imports()
             
+            # ── Unset any proxy env vars so libpq connects directly ──
+            # The http_proxy / https_proxy env vars are NOT set by our
+            # Dockerfile or entrypoint — the Binance proxy is configured
+            # via BINANCE_PROXY config + a custom urllib opener in the
+            # BinanceClient class. However, Hugging Face Spaces or other
+            # container environments MAY inject them globally. If libpq
+            # picks up http_proxy, it tries to route the PostgreSQL wire
+            # protocol through Privoxy (HTTP proxy), which rejects the
+            # non-HTTP socket connection and raises OperationalError.
+            # Popping them here guarantees a direct connection to Neon.
+            for _key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+                os.environ.pop(_key, None)
+            
             sslmode = "require"
             if "sslmode=" not in DATABASE_URL:
                 _conn = _psycopg.connect(DATABASE_URL + f"&sslmode={sslmode}")
