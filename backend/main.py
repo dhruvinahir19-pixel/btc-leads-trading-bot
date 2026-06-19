@@ -32,6 +32,7 @@ from backend.config import (
     to_ist_timestamp, CANDLE_CHECK_MINUTE, CANDLE_CHECK_SECOND,
     IN_TRADE_CHECK_INTERVAL, SCAN_DAY, SCAN_HOUR,
     IS_RENDER, RENDER_EXTERNAL_URL, IST_TZ, now_ist,
+    IS_HF, HF_SPACE_ID,
 )
 from backend.database.db import (
     init_db, get_connection, get_recent_trades, get_trade_stats,
@@ -89,12 +90,27 @@ async def lifespan(app: FastAPI):
     
     try:
         # Initialize structured logging
+        # On Hugging Face Spaces: log to stdout ONLY (no file handler)
+        # because the container filesystem is ephemeral.
         log_dir = BASE_DIR / "logs"
-        setup_logging(log_dir=log_dir, log_level=LOG_LEVEL)
+        setup_logging(log_dir=log_dir, log_level=LOG_LEVEL,
+                      enable_file_logging=not IS_HF)
         
         logger.info(f"{'='*60}")
         logger.info(f"TRADING BOT v1.0 - Starting up")
         logger.info(f"DB: {DB_PATH}")
+        
+        # ── Hugging Face Spaces: warn about ephemeral storage ──
+        if IS_HF:
+            space_id = HF_SPACE_ID or "(unknown)"
+            logger.warning(
+                f"Running on Hugging Face Space: {space_id}. "
+                f"The SQLite database at {DB_PATH} is EPHEMERAL — "
+                f"all trade history and state will be LOST on restart. "
+                f"For persistent storage, configure an external PostgreSQL "
+                f"database or enable HF Spaces persistent storage (paid). "
+                f"See: https://huggingface.co/docs/hub/spaces-storage"
+            )
         logger.info(f"{'='*60}")
         
         # Initialize database

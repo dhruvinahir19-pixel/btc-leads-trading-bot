@@ -32,12 +32,15 @@ def setup_logging(
     log_level: str = "INFO",
     max_bytes: int = 10 * 1024 * 1024,  # 10 MB
     backup_count: int = 5,
+    enable_file_logging: bool = True,
 ) -> logging.Logger:
     """
     Configure structured JSON logging.
 
     - stdout handler: JSON lines (for Docker logs, journald, etc.)
-    - file handler: Rotating JSON files (for local debugging)
+    - file handler: Rotating JSON files (for local debugging) —
+      SKIPPED on Hugging Face Spaces (ephemeral filesystem) or
+      whenever enable_file_logging=False.
     - Returns the root 'trading_bot' logger.
 
     Call this once at application startup.
@@ -57,8 +60,8 @@ def setup_logging(
     stdout_handler.setFormatter(json_formatter)
     root_logger.addHandler(stdout_handler)
 
-    # --- Handler 2: Rotating file (local) ---
-    if log_dir:
+    # --- Handler 2: Rotating file (local), SKIPPED on HF Spaces ---
+    if enable_file_logging and log_dir:
         log_dir = Path(log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "trading_bot.log"
@@ -73,6 +76,9 @@ def setup_logging(
         file_handler.setFormatter(json_formatter)
         root_logger.addHandler(file_handler)
         root_logger.info(f"Logging to file: {log_path}")
+
+    if not enable_file_logging:
+        root_logger.info("File logging disabled (HF Spaces — logs go to stdout only)")
 
     return root_logger
 

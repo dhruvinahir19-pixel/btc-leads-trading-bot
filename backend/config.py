@@ -147,10 +147,20 @@ LOG_LEVEL = env("LOG_LEVEL", "INFO")
 HOST = env("HOST", "0.0.0.0")
 PORT = env_int("PORT", 8000)
 
-# ─── Render.com Detection ───────────────────────────────────
+# ─── Platform Detection ────────────────────────────────────────
 IS_RENDER = "RENDER" in os.environ or "RENDER_EXTERNAL_URL" in os.environ
 RENDER_EXTERNAL_URL = env("RENDER_EXTERNAL_URL", "")
 RENDER_SERVICE_NAME = env("RENDER_SERVICE_NAME", "btc-trading-bot")
+
+# ─── Hugging Face Spaces Detection ─────────────────────────────
+# Hugging Face Spaces sets these env vars automatically:
+#   SPACE_ID      - The space identifier (e.g., "username/space-name")
+#   SPACE_TITLE   - The space title
+#   SPACE_HOST    - The space hostname
+# We also check HF_APP which we set in the Dockerfile as a fallback.
+IS_HF = ("SPACE_ID" in os.environ or "SPACE_HOST" in os.environ
+         or env("HF_APP", "") == "1")
+HF_SPACE_ID = env("SPACE_ID", "")
 
 
 # ─── IST Timezone (UTC + 5:30) ──────────────────────────────
