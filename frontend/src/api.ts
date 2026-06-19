@@ -13,16 +13,45 @@ import type {
 
 const BASE = '';  // Same origin, FastAPI handles it
 
-async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
-    headers: { 'Accept': 'application/json' },
-    ...options,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => 'Unknown error');
-    throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T | null> {
+  try {
+    const res = await fetch(url, {
+      headers: { 'Accept': 'application/json' },
+      ...options,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => 'Unknown error');
+      // If the server returns HTML (e.g. error page), don't throw —
+      // the caller will get null and show fallback/empty states.
+      if (text.trim().startsWith('<')) {
+        console.warn(`[API] ${url} returned HTTP ${res.status} with HTML body`);
+        return null;
+      }
+      throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+    }
+    // Check Content-Type to avoid parsing HTML as JSON
+    const ct = res.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) {
+      console.warn(`[API] ${url} returned content-type "${ct}" — expected application/json`);
+      const body = await res.text().catch(() => '');
+      // If it looks like HTML, return null gracefully
+      if (body.trim().startsWith('<')) {
+        return null;
+      }
+      // Otherwise try to parse anyway; might be a non-standard JSON response
+      try { return JSON.parse(body); } catch { return null; }
+    }
+    return res.json();
+  } catch (err) {
+    // Network errors, JSON parse errors — return null so the
+    // dashboard shows fallback/empty states instead of crashing.
+    if (err instanceof SyntaxError) {
+      console.warn(`[API] ${url} returned non-JSON response: ${err.message}`);
+    } else if (err instanceof TypeError) {
+      console.warn(`[API] ${url} network error: ${err.message}`);
+    }
+    return null;
   }
-  return res.json();
 }
 
 export function getHealth(): Promise<HealthResponse> {
