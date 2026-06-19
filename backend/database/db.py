@@ -306,9 +306,9 @@ def get_trade_stats() -> dict:
         row = cursor.fetchone()
         if row is None:
             return 0
-        # Both sqlite3.Row and psycopg dict_row support access by index.
-        # row[0] gives the first (and only) column value.
-        return row[0]
+        # psycopg dict_row only supports name-based access; sqlite3.Row
+        # supports both. Use name-based via dict() for both backends.
+        return list(dict(row).values())[0]
     
     total = _scalar("SELECT COUNT(*) FROM trades")
     winning_trades = _scalar("SELECT COUNT(*) FROM trades WHERE exit_reason = 'tp_hit'")
@@ -526,10 +526,10 @@ def get_daily_pnl(date_str: Optional[str] = None) -> float:
         (date_str,)
     )
     row = cursor.fetchone()
-    if row:
-        # Both sqlite3.Row and psycopg dict_row support index access.
-        # row[0] returns the first column value (COALESCE result).
-        return float(round(float(row[0]), 2))
+    if row is not None and row['total'] is not None:
+        # Use column name (aliased as 'total') — works for both
+        # sqlite3.Row (supports name access) and psycopg dict_row.
+        return float(round(float(row['total']), 2))
     return 0.0
 
 
@@ -627,11 +627,11 @@ def get_trade_journal(
     
     # Get total count
     count_cursor = _execute(conn,
-        f"SELECT COUNT(*) FROM trades WHERE {where_sql}", tuple(params) if params else None
+        f"SELECT COUNT(*) AS cnt FROM trades WHERE {where_sql}", tuple(params) if params else None
     )
     count_row = count_cursor.fetchone()
-    # Both sqlite3.Row and psycopg dict_row support index access via row[0]
-    total = count_row[0] if count_row else 0
+    # Use column name (aliased as 'cnt') — works for both backends
+    total = count_row['cnt'] if count_row else 0
     
     # Get paginated results
     cursor = _execute(conn,
