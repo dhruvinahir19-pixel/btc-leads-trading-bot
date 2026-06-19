@@ -13,6 +13,7 @@ Development / Testing (SQLite fallback):
 Thread-safe: uses threading.Lock for both backends.
 """
 import json
+import os
 import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
