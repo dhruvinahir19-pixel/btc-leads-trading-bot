@@ -1,8 +1,11 @@
 name: Sync to Hugging Face Spaces
 
 on:
+  # Trigger on push to ANY branch (the push command dynamically detects
+  # the current branch and maps it to HF's 'main' branch).
   push:
-    branches: [main]
+    branches:
+      - '*'
 
   # Allow manual trigger from GitHub Actions UI
   workflow_dispatch:
@@ -15,23 +18,42 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Push to Hugging Face Space
+      - name: Validate required secrets
         env:
-          # ════════════════════════════════════════════════════════════════
-          # REQUIRED GitHub Repository Secrets (Settings → Secrets → Actions):
-          #
-          #   HF_TOKEN         — Hugging Face access token (read/write)
-          #                      Generate at: https://huggingface.co/settings/tokens
-          #
-          #   HF_SPACE_URL     — Full URL of your Space, e.g.:
-          #                      "username/btc-trading-bot"
-          #                      Create the Space first at: https://huggingface.co/new-space
-          #                      (Select Docker SDK, leave hardware as Free)
-          # ════════════════════════════════════════════════════════════════
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE_URL: ${{ secrets.HF_SPACE_URL }}
         run: |
-          echo "🔄 Syncing to huggingface.co/spaces/${HF_SPACE_URL} ..."
+          if [ -z "$HF_TOKEN" ]; then
+            echo "❌ ERROR: HF_TOKEN secret is not set."
+            echo "   Go to: GitHub repo → Settings → Secrets and variables → Actions"
+            echo "   Add secret: HF_TOKEN = your Hugging Face access token (with write permission)"
+            exit 1
+          fi
+          if [ -z "$HF_SPACE_URL" ]; then
+            echo "❌ ERROR: HF_SPACE_URL secret is not set."
+            echo "   Go to: GitHub repo → Settings → Secrets and variables → Actions"
+            echo "   Add secret: HF_SPACE_URL = your space path, e.g. 'username/btc-trading-bot'"
+            exit 1
+          fi
+          echo "✅ All required secrets are set."
+
+      - name: Detect current branch
+        id: branch
+        run: |
+          BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "🔍 Detected local branch: $BRANCH"
+          echo "   Will push to HF as: HEAD:refs/heads/main"
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_URL: ${{ secrets.HF_SPACE_URL }}
+        run: |
+          echo "🔄 Syncing branch '${{ steps.branch.outputs.branch }}' → huggingface.co/spaces/${HF_SPACE_URL} ..."
           git remote add hf "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_URL}"
-          git push hf main --force
+          # Use HEAD:refs/heads/main to force-map whatever local branch we're on
+          # to HF's default 'main' branch. This avoids the "src refspec main does
+          # not match any" error when the local branch is named 'master'.
+          git push hf HEAD:refs/heads/main --force
           echo "✅ Sync complete. Visit: https://huggingface.co/spaces/${HF_SPACE_URL}"
