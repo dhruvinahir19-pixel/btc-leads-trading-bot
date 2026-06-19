@@ -144,8 +144,9 @@ TRADE_START_HOUR = env_int("TRADE_START_HOUR", 0)    # 24h format
 TRADE_END_HOUR = env_int("TRADE_END_HOUR", 23)
 
 # ─── Database ────────────────────────────────────────────────
-# Production: PostgreSQL via DATABASE_URL (e.g. Neon.tech connection string)
-# Development: SQLite local file (when DATABASE_URL is not set)
+# Local SQLite database file.
+# DATABASE_URL is kept as a legacy config for compatibility but
+# db.py no longer reads it — the app uses SQLite exclusively.
 DATABASE_URL = env("DATABASE_URL", "")
 DB_PATH = BASE_DIR / env("DB_PATH", "trading_bot.db")
 

@@ -561,11 +561,13 @@ def take_pnl_snapshot():
     """Take a PnL snapshot for the equity curve chart.
     Runs every hour and at startup.
     
-    SAFETY: Already had try/except, but now also catches critical failures.
+    After saving the snapshot, sends a daily stats summary email via Brevo
+    with the latest PnL, trade counts, risk state, and open positions.
     """
     try:
         from backend.state.state_manager import get_bot_status
-        from backend.database.db import get_trade_stats, save_pnl_snapshot
+        from backend.database.db import get_trade_stats, save_pnl_snapshot,\
+            get_open_trades, get_recent_logs
         stats = get_trade_stats()
         status = get_bot_status()
         save_pnl_snapshot(
@@ -575,6 +577,68 @@ def take_pnl_snapshot():
             in_trade=status.get('in_trade', False),
         )
         logger.debug(f"PnL snapshot saved: total=${stats.get('total_pnl', 0):.2f}")
+        
+        # ── Send daily stats email via Brevo ──
+        try:
+            notifier = get_notifier()
+            if notifier.is_configured:
+                now_ist = datetime.now(timezone.utc) + timedelta(hours=5.5)
+                open_trades = get_open_trades()
+                recent_logs = get_recent_logs(level='ERROR', limit=5)
+                
+                # Build a plain-text summary block
+                daily_lines = [
+                    f"BTC Leads Trading Bot — Hourly Report",
+                    f"{'=' * 45}",
+                    f"Time (IST): {now_ist.strftime('%Y-%m-%d %H:%M:%S')}",
+                    f"",
+                    f"── Daily PnL ──",
+                    f"  Today: ${stats.get('today_pnl', 0):+.2f}",
+                    f"  Total: ${stats.get('total_pnl', 0):+.2f}",
+                    f"",
+                    f"── Trade Stats ──",
+                    f"  Total Trades: {stats.get('total_trades', 0)}",
+                    f"  Win Rate: {stats.get('win_rate', 0)}%",
+                    f"  Consecutive Losses: {status.get('consecutive_losses', 0)}",
+                    f"  Open Positions: {len(open_trades)}",
+                    f"",
+                    f"── Risk State ──",
+                    f"  Daily Trade Count: {status.get('daily_trade_count', 0)}",
+                    f"  Circuit Breaker: {'ACTIVE' if status.get('circuit_breaker_triggered', False) else 'Normal'}",
+                    f"  In Trade: {'Yes' if status.get('in_trade', False) else 'No'}",
+                ]
+                
+                if open_trades:
+                    daily_lines.append(f"")
+                    daily_lines.append(f"── Open Positions ──")
+                    for t in open_trades:
+                        daily_lines.append(
+                            f"  {t.get('coin', '?')} {t.get('side', '?')} "
+                            f"@ ${t.get('entry_price', 0):.6f}"
+                        )
+                
+                if recent_logs:
+                    daily_lines.append(f"")
+                    daily_lines.append(f"── Recent Errors ({len(recent_logs)}) ──")
+                    for log in recent_logs[:3]:
+                        daily_lines.append(f"  [{log.get('module', '?')}] {log.get('message', '')[:80]}")
+                
+                daily_lines.append(f"")
+                daily_lines.append(f"{'=' * 45}")
+                daily_lines.append(f"Sent automatically after PnL snapshot")
+                
+                plain_body = "\n".join(daily_lines)
+                html_body = plain_body.replace("\n", "<br>")
+                
+                notifier._send(
+                    f"📊 Hourly Snapshot — ${stats.get('today_pnl', 0):+.2f} today",
+                    f"<pre style='font-family:monospace;font-size:13px;background:#1a1a2e;"
+                    f"color:#e0e0e0;padding:12px;border-radius:6px'>{html_body}</pre>"
+                )
+                logger.debug("Hourly snapshot email sent via Brevo")
+        except Exception as email_err:
+            logger.debug(f"Snapshot email skipped: {email_err}")
+            
     except Exception as e:
         logger.warning(f"PnL snapshot failed: {e}")
 
