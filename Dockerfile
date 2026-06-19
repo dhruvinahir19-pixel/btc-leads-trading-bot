@@ -58,10 +58,12 @@ COPY --from=frontend-builder /app/backend/static/ ./backend/static/
 RUN mkdir -p /app/data && chown -R appuser:appuser /app
 
 # ── Environment defaults ──
+# HF_APP is set to 1 so the app can detect it's running on HF Spaces
+# (used together with SPACE_ID env var for IS_HF detection in config.py)
 ENV HOST=0.0.0.0
 ENV LOG_LEVEL=INFO
 ENV DB_PATH=/app/data/trading_bot.db
-ENV HF_APP=1  # Flag for the app to detect HF Spaces environment
+ENV HF_APP=1
 
 # ── Switch to non-root user ──
 USER appuser
