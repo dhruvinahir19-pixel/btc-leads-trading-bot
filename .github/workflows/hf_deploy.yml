@@ -1,8 +1,8 @@
 name: Sync to Hugging Face Spaces
 
 on:
-  # Trigger on push to ANY branch (the push command dynamically detects
-  # the current branch and maps it to HF's 'main' branch).
+  # Trigger on push to ANY branch (the push command uses HEAD:refs/heads/main
+  # to map whatever local branch we're on to HF's 'main' branch).
   push:
     branches:
       - '*'
@@ -18,42 +18,37 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate required secrets
+      - name: Validate HF_TOKEN secret
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_SPACE_URL: ${{ secrets.HF_SPACE_URL }}
         run: |
           if [ -z "$HF_TOKEN" ]; then
             echo "❌ ERROR: HF_TOKEN secret is not set."
             echo "   Go to: GitHub repo → Settings → Secrets and variables → Actions"
             echo "   Add secret: HF_TOKEN = your Hugging Face access token (with write permission)"
+            echo "   Generate token at: https://huggingface.co/settings/tokens"
             exit 1
           fi
-          if [ -z "$HF_SPACE_URL" ]; then
-            echo "❌ ERROR: HF_SPACE_URL secret is not set."
-            echo "   Go to: GitHub repo → Settings → Secrets and variables → Actions"
-            echo "   Add secret: HF_SPACE_URL = your space path, e.g. 'username/btc-trading-bot'"
-            exit 1
-          fi
-          echo "✅ All required secrets are set."
+          echo "✅ HF_TOKEN is set."
 
       - name: Detect current branch
         id: branch
         run: |
           BRANCH=$(git rev-parse --abbrev-ref HEAD)
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
-          echo "🔍 Detected local branch: $BRANCH"
-          echo "   Will push to HF as: HEAD:refs/heads/main"
+          echo "🔍 Local branch: $BRANCH"
+          echo "   Will push as: HEAD:refs/heads/main"
 
       - name: Push to Hugging Face Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_SPACE_URL: ${{ secrets.HF_SPACE_URL }}
         run: |
-          echo "🔄 Syncing branch '${{ steps.branch.outputs.branch }}' → huggingface.co/spaces/${HF_SPACE_URL} ..."
-          git remote add hf "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_URL}"
-          # Use HEAD:refs/heads/main to force-map whatever local branch we're on
-          # to HF's default 'main' branch. This avoids the "src refspec main does
-          # not match any" error when the local branch is named 'master'.
+          HF_SPACE="DDahir/btc-lead-trading-bot"
+          echo "🔄 Syncing '${{ steps.branch.outputs.branch }}' → huggingface.co/spaces/${HF_SPACE} ..."
+          git remote add hf "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}"
+          # HEAD:refs/heads/main forces whatever local branch we're on to map
+          # to HF's default 'main' branch. This solves the "src refspec main
+          # does not match any" error when the local branch is 'master'.
           git push hf HEAD:refs/heads/main --force
-          echo "✅ Sync complete. Visit: https://huggingface.co/spaces/${HF_SPACE_URL}"
+          echo "✅ Sync complete."
+          echo "   Visit: https://huggingface.co/spaces/${HF_SPACE}"
