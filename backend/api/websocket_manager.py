@@ -21,6 +21,9 @@ from typing import Optional
 
 import websocket
 
+from urllib.parse import urlparse
+
+from backend.config import BINANCE_PROXY
 from backend.logging_setup import get_logger
 
 logger = get_logger("ws")
@@ -152,8 +155,25 @@ def _run_loop():
                 on_close=_on_close,
                 on_error=_on_error,
             )
+            # ── Set up proxy for WebSocket connection (if configured) ──
+            # When BINANCE_PROXY is set (e.g. http://127.0.0.1:8118),
+            # route the WebSocket stream through Privoxy → Tor SOCKS5
+            # to bypass Binance geo-restriction from HF Spaces servers.
+            ws_proxy_opts = {}
+            if BINANCE_PROXY:
+                parsed = urlparse(BINANCE_PROXY)
+                ws_proxy_opts = {
+                    "http_proxy_host": parsed.hostname or "127.0.0.1",
+                    "http_proxy_port": parsed.port or 8118,
+                    "proxy_type": "http",
+                }
+            
             # run_forever blocks the thread until disconnect
-            _ws.run_forever(ping_interval=30, ping_timeout=10)
+            _ws.run_forever(
+                ping_interval=30,
+                ping_timeout=10,
+                **ws_proxy_opts,
+            )
 
         except Exception as e:
             logger.warning(f"WebSocket connection error: {e}")

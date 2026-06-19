@@ -29,9 +29,15 @@ RUN groupadd -g 1000 appuser && \
 
 # ── Install system dependencies ──
 # curl is needed for the HEALTHCHECK command.
+# tor + privoxy bypass Binance geo-restriction (HTTP 451) from Hugging Face US servers.
 # libsqlite3-0 is already included in the slim image.
+# sudo is needed by docker-entrypoint.sh to drop from root to appuser
+# while preserving proper Docker signal forwarding (SIGTERM → uvicorn PID 1).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    tor \
+    privoxy \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Switching to appuser for pip install to avoid pip root warnings ──
@@ -67,8 +73,22 @@ ENV DB_PATH=/app/data/trading_bot.db
 ENV HF_APP=1
 ENV TZ=Asia/Kolkata
 
-# ── Switch to non-root user ──
-USER appuser
+# ── Proxy environment (Tor → Privoxy → app) ──
+# Privoxy listens on 8118 and forwards to Tor's SOCKS5 on 9050.
+# BinanceClient uses this to bypass geo-restriction from HF Spaces.
+# Can be overridden per-env (e.g. dev without Tor).
+ENV BINANCE_PROXY=http://127.0.0.1:8118
+
+# ── Entrypoint: starts tor + privoxy, then drops to appuser ──
+# ENTRYPOINT MUST run as root so it can start the Tor daemon.
+# The entrypoint script handles the drop to appuser via sudo -u.
+# We intentionally do NOT set USER appuser — Docker uses the last USER
+# for both ENTRYPOINT and CMD at runtime, which would prevent tor from
+# starting. The HEALTHCHECK runs as root (fine — curl works as root).
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # ── HEALTHCHECK ──
 # Hugging Face Spaces uses port 7860 internally for routing external traffic

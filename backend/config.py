@@ -79,6 +79,12 @@ BINANCE_DEMO_SECRET = env("BINANCE_DEMO_SECRET")
 BASE_URL = "https://fapi.binance.com"  # Mainnet (for real API / data)
 BASE_URL_TESTNET = "https://testnet.binancefuture.com"  # Testnet (for demo API / orders)
 
+# ─── Proxy for Binance API (Tor/Privoxy) ─────────────────────
+# When running on HF Spaces (US servers), Binance returns HTTP 451.
+# Set this to http://127.0.0.1:8118 (Tor → Privoxy) to bypass.
+# Can be left empty to disable proxying (local dev / non-blocked env).
+BINANCE_PROXY = env("BINANCE_PROXY", "")
+
 # ─── Strategy Parameters ─────────────────────────────────────
 BTC_TRIGGER_PCT = env_float("BTC_TRIGGER_PCT", 1.0)  # 1% BTC move triggers
 TP_PCT = env_float("TP_PCT", 1.0)                  # 1% take profit

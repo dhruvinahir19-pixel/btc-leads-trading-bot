@@ -18,6 +18,7 @@ from backend.config import (
     BINANCE_API_KEY, BINANCE_API_SECRET,
     BINANCE_DEMO_KEY, BINANCE_DEMO_SECRET,
     BASE_URL, BASE_URL_TESTNET, SCAN_MAX_SYMBOLS,
+    BINANCE_PROXY,
 )
 
 # ─── Constants ──────────────────────────────────────────────
@@ -299,6 +300,11 @@ class BinanceClient:
     Args:
         use_demo: If True, uses demo API keys for order placement.
                   If False, uses real API keys for data fetching.
+
+    Proxy support: If BINANCE_PROXY is set (e.g., http://127.0.0.1:8118),
+    all outbound HTTP requests are routed through that proxy. This allows
+    bypassing Binance's geo-restriction from US-based servers (HF Spaces)
+    by routing through Tor + Privoxy running inside the container.
     """
 
     def __init__(self, use_demo: bool = False):
@@ -312,6 +318,25 @@ class BinanceClient:
             self.base_url = BASE_URL  # Mainnet for real data
             self.api_key = BINANCE_API_KEY
             self.api_secret = BINANCE_API_SECRET
+
+        # ── Rate limiting (equivalent to CCXT's enableRateLimit=True) ──
+        # This client implements its own throttling via _enforce_throttle()
+        # which ensures MIN_REQUEST_INTERVAL (0.8s) between API calls,
+        # keeping us well under Binance's 1200 weight/min limit (~75 req/min).
+        # Combined with exponential backoff + jitter on 429/5xx retries,
+        # this serves as the rate limiting mechanism.
+
+        # ── Set up proxy opener if configured ──
+        # When BINANCE_PROXY is set, urllib will route ALL Binance API
+        # requests through the proxy (Privoxy → Tor SOCKS5).
+        if BINANCE_PROXY:
+            proxy_handler = urllib.request.ProxyHandler({
+                'http': BINANCE_PROXY,
+                'https': BINANCE_PROXY,
+            })
+            self._opener = urllib.request.build_opener(proxy_handler)
+        else:
+            self._opener = urllib.request.build_opener()
 
     # ─── Request Helpers ─────────────────────────────────────
 
@@ -374,7 +399,7 @@ class BinanceClient:
             url = f"{url}?{query}"
 
         req = urllib.request.Request(url, headers=headers, method=method)
-        resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
+        resp = self._opener.open(req, timeout=REQUEST_TIMEOUT)
         raw = resp.read().decode('utf-8', errors='replace')
 
         # Check for Binance error codes in response
