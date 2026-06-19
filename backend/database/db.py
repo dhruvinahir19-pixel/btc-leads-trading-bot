@@ -102,10 +102,23 @@ def get_connection():
                 os.environ.pop(_key, None)
             
             sslmode = "require"
+            # ── Explicit sslrootcert to avoid ~/.postgresql/ lookup ──
+            # libpq searches ~/.postgresql/root.crt by default for the
+            # root CA certificate. When running as appuser, this path
+            # may not exist or may point to root's home dir where we
+            # have no read permission, causing Permission denied errors.
+            # Passing sslrootcert="" tells libpq to use the system CA
+            # store (/etc/ssl/certs/) instead.
             if "sslmode=" not in DATABASE_URL:
-                _conn = _psycopg.connect(DATABASE_URL + f"&sslmode={sslmode}")
+                _conn = _psycopg.connect(
+                    DATABASE_URL + f"&sslmode={sslmode}",
+                    sslrootcert="",
+                )
             else:
-                _conn = _psycopg.connect(DATABASE_URL)
+                _conn = _psycopg.connect(
+                    DATABASE_URL,
+                    sslrootcert="",
+                )
             _conn.autocommit = False
             _conn.row_factory = _dict_row
             
