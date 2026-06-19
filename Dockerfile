@@ -1,14 +1,14 @@
 # =============================================================================
 # Stage 1: Build Frontend (React + Vite)
 # =============================================================================
-FROM node:20-alpine AS frontend-builder
+FROM node:20-slim AS frontend-builder
 
 WORKDIR /app/frontend
 
 # Copy package files first (for layer caching)
 # Uses wildcard so it works whether or not package-lock.json exists
 COPY frontend/package*.json ./
-RUN npm ci --omit=optional
+RUN npm ci
 
 # Copy frontend source
 COPY frontend/ .
