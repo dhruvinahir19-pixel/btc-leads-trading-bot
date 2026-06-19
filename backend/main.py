@@ -26,7 +26,7 @@ logger = get_logger("main")
 
 # ─── Backend Imports ───────────────────────────────────────
 from backend.config import (
-    HOST, PORT, LOG_LEVEL, show_config, DB_PATH, BASE_DIR,
+    HOST, PORT, LOG_LEVEL, show_config, DB_PATH, BASE_DIR, DATABASE_URL,
     TRADING_COINS, BINANCE_DEMO_KEY, SMTP_EMAIL,
     BTC_TRIGGER_PCT, TP_PCT, SL_PCT, POSITION_SIZE_USDT, MAX_DAILY_LOSS_USDT,
     to_ist_timestamp, CANDLE_CHECK_MINUTE, CANDLE_CHECK_SECOND,

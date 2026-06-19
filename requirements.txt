@@ -2,8 +2,11 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 
-# Database
-aiosqlite==0.20.0
+# Database — PostgreSQL (production) with SQLite fallback (development/testing)
+# psycopg 3 provides the binary extension for fast PostgreSQL connectivity
+# The app falls back to built-in sqlite3 when DATABASE_URL is not set.
+psycopg[binary]==3.3.4
+python-dotenv==1.1.0
 
 # Scheduling
 apscheduler==3.11.0
