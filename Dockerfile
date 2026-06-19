@@ -73,6 +73,14 @@ ENV DB_PATH=/app/data/trading_bot.db
 ENV HF_APP=1
 ENV TZ=Asia/Kolkata
 
+# ── PostgreSQL SSL Configuration ──
+# psycopg/libpq searches ~/.postgresql/ for client certificates by default.
+# Since we run as appuser at runtime (and root's ~/.postgresql/ is inaccessible),
+# set PGSSLMODE=require explicitly so libpq uses the system CA store
+# (/etc/ssl/certs/) instead of looking in root's home directory.
+# This avoids SSL certificate path permission errors on Neon.tech connections.
+ENV PGSSLMODE=require
+
 # ── Proxy environment (Tor → Privoxy → app) ──
 # Privoxy listens on 8118 and forwards to Tor's SOCKS5 on 9050.
 # BinanceClient uses this to bypass geo-restriction from HF Spaces.

@@ -10,8 +10,19 @@ set -e
 
 # ── Write a minimal Privoxy config that forwards HTTP → Tor SOCKS5 ──
 # forward-socks5t = SOCKS5 with Torify (DNS resolution goes through Tor too)
+#
+# EXCEPTIONS:
+#   forward :5432 .          — Direct connection for PostgreSQL on port 5432
+#   forward .neon.tech .     — Direct connection for Neon.tech (no Tor latency)
+# These prevent Tor from interfering with the PostgreSQL database connection.
 cat > /tmp/privoxy-config << 'PRIVOXY_EOF'
 listen-address  127.0.0.1:8118
+
+# Direct (no proxy) for Neon.tech database traffic
+forward :5432 .
+forward .neon.tech .
+
+# Everything else → Tor SOCKS5
 forward-socks5t / 127.0.0.1:9050 .
 PRIVOXY_EOF
 
@@ -57,6 +68,14 @@ done
 if [ "$PRIVOXY_OK" -ne 1 ]; then
     echo "[entrypoint] WARNING: Privoxy did not start within 15s."
 fi
+
+# ── Stabilization delay for Tor circuit + network pipes ──
+# Tor circuits take several seconds to bootstrap after the SOCKS5 port comes
+# up. The Privoxy → Tor chain also needs time to stabilize. Without this wait,
+# the app may try to connect through Tor before circuits are ready, causing
+# timeouts, DNS failures, and database connection errors.
+echo "[entrypoint] Waiting 12s for Tor circuits and network pipes to stabilize..."
+sleep 12
 
 # ── Drop privileges to appuser and launch the application ──
 # sudo -E preserves environment variables, -u appuser runs the command
