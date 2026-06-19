@@ -65,6 +65,7 @@ ENV HOST=0.0.0.0
 ENV LOG_LEVEL=INFO
 ENV DB_PATH=/app/data/trading_bot.db
 ENV HF_APP=1
+ENV TZ=Asia/Kolkata
 
 # ── Switch to non-root user ──
 USER appuser
