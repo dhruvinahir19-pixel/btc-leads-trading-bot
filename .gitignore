@@ -17,7 +17,11 @@ venv/
 *.log
 signals_*.csv
 data/
+# SQLite database files (including WAL and SHM runtime artifacts)
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
 
 # ─── Frontend / Node ───────────────────────────────────────────
 frontend/node_modules/
