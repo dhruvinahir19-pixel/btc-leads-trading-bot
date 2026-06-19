@@ -1,4 +1,15 @@
-# BTC Leads Trading Bot
+---
+title: Btc Lead Trading Bot
+emoji: 📈
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
+# BTC Lead Trading Bot
+Automated algorithmic trading system running on Hugging Face Spaces.
 
 An algorithmic trading bot for Binance Futures that trades altcoins based on Bitcoin price movements. Monitors BTC 1H candles and enters positions on correlated altcoins when BTC moves beyond a threshold.
 
