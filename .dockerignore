@@ -15,7 +15,6 @@ venv/
 
 # Node / Frontend
 frontend/node_modules/
-frontend/package-lock.json
 
 # Data (persisted via volume)
 data/
